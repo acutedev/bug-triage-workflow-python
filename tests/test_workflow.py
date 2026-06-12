@@ -5,6 +5,7 @@ import asyncio
 import src.workflow as workflow_module
 from src.models import (
     BugCategory,
+    HumanApprovalDecision,
     RouteName,
     Sentiment,
     Urgency,
@@ -37,6 +38,14 @@ def make_llm_response(
     }
 
 
+def security_bug_report() -> str:
+    return (
+        "In production on Chrome using Windows, when I open the account page, "
+        "I can view another user's private data instead of my own data. "
+        "It should only display my account."
+    )
+
+
 def test_build_bug_triage_workflow_contains_expected_executors():
     workflow = build_bug_triage_workflow(
         lambda prompt: make_llm_response()
@@ -46,8 +55,6 @@ def test_build_bug_triage_workflow_contains_expected_executors():
         workflow_executor.id
         for workflow_executor in workflow.get_executors_list()
     }
-
-
     assert executor_ids == {
         "preprocess_executor",
         "classifier_executor",
@@ -56,6 +63,8 @@ def test_build_bug_triage_workflow_contains_expected_executors():
         "create_standard_ticket_executor",
         "request_human_approval_executor",
         "unexpected_route_executor",
+        "create_escalation_ticket_executor",
+        "log_rejection_executor",
     }
 
 
@@ -134,29 +143,131 @@ def test_workflow_requests_more_information_when_report_is_incomplete():
     )
 
 
-def test_workflow_requests_human_approval_for_security_report():
-    bug_report = (
-        "In production on Chrome using Windows, when I open the account page, "
-        "I can view another user's private data instead of my own data. "
-        "It should only display my account."
-    )
-
-    result = asyncio.run(
-        run_bug_triage_workflow(
-            bug_report,
+def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
+    async def run_scenario():
+        workflow = build_bug_triage_workflow(
             lambda prompt: make_llm_response(
                 category=BugCategory.SECURITY,
                 urgency=Urgency.CRITICAL,
                 sentiment=Sentiment.NEUTRAL,
                 recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            ),
+            )
         )
+
+        initial_stream = workflow.run(
+            security_bug_report(),
+            stream=True,
+            include_status_events=True,
+        )
+        initial_events = [event async for event in initial_stream]
+
+        request_event = next(
+            event for event in initial_events if event.type == "request_info"
+        )
+
+        resumed_stream = workflow.run(
+            stream=True,
+            responses={
+                request_event.request_id: HumanApprovalDecision(
+                    required=True,
+                    approval_granted=True,
+                    approver="integration-test",
+                    notes="Approved for escalation.",
+                )
+            },
+            include_status_events=True,
+        )
+        resumed_events = [event async for event in resumed_stream]
+        return initial_events, resumed_events
+
+    initial_events, resumed_events = asyncio.run(run_scenario())
+
+    waiting_result = next(
+        event.data
+        for event in initial_events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    )
+    final_result = next(
+        event.data
+        for event in resumed_events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
     )
 
-    assert result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
-    assert result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
-    assert result.human_approval_required is True
-    assert result.final_action is None
+    assert waiting_result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
+    assert waiting_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+    assert waiting_result.human_approval_required is True
+    assert waiting_result.approval_granted is None
+    assert waiting_result.final_action is None
+
+    assert final_result.status == WorkflowStatus.COMPLETED
+    assert final_result.selected_route == RouteName.CREATE_ESCALATION_TICKET
+    assert final_result.human_approval_required is True
+    assert final_result.approval_granted is True
+    assert final_result.final_action == (
+        "Create an escalation ticket for human-reviewed handling."
+    )
+
+
+def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
+    async def run_scenario():
+        workflow = build_bug_triage_workflow(
+            lambda prompt: make_llm_response(
+                category=BugCategory.SECURITY,
+                urgency=Urgency.CRITICAL,
+                sentiment=Sentiment.NEUTRAL,
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            )
+        )
+
+        initial_stream = workflow.run(
+            security_bug_report(),
+            stream=True,
+            include_status_events=True,
+        )
+        initial_events = [event async for event in initial_stream]
+
+        request_event = next(
+            event for event in initial_events if event.type == "request_info"
+        )
+
+        resumed_stream = workflow.run(
+            stream=True,
+            responses={
+                request_event.request_id: HumanApprovalDecision(
+                    required=True,
+                    approval_granted=False,
+                    approver="integration-test",
+                    notes="Rejected after review.",
+                )
+            },
+            include_status_events=True,
+        )
+        resumed_events = [event async for event in resumed_stream]
+        return initial_events, resumed_events
+
+    initial_events, resumed_events = asyncio.run(run_scenario())
+
+    waiting_result = next(
+        event.data
+        for event in initial_events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    )
+    final_result = next(
+        event.data
+        for event in resumed_events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    )
+
+    assert waiting_result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
+    assert waiting_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+    assert waiting_result.human_approval_required is True
+    assert waiting_result.approval_granted is None
+    assert waiting_result.final_action is None
+    assert final_result.status == WorkflowStatus.REJECTED
+    assert final_result.selected_route == RouteName.LOG_REJECTION
+    assert final_result.human_approval_required is True
+    assert final_result.approval_granted is False
+    assert final_result.final_action is None
 
 
 def test_workflow_stream_emits_final_workflow_result():

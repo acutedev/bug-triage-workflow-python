@@ -17,15 +17,19 @@ from typing import Any
 from agent_framework import (
     Case,
     Default,
+    Executor,
     Workflow,
     WorkflowBuilder,
     WorkflowContext,
     executor,
+    handler,
+    response_handler,
 )
 from typing_extensions import Never
 
 from src.classifier import LLMClassifierClient, classify_bug_report
 from src.models import (
+    HumanApprovalDecision,
     PreprocessedBugReport,
     RouteDecision,
     RouteName,
@@ -54,6 +58,81 @@ class RoutedBugReport:
     route_decision: RouteDecision
 
 
+@dataclass(frozen=True)
+class HumanApprovalRequest:
+    """Information presented to the human approver."""
+
+    routed_report: RoutedBugReport
+    prompt: str
+
+
+@dataclass(frozen=True)
+class HumanApprovalOutcome:
+    """Human decision passed to the approved or rejected branch."""
+
+    routed_report: RoutedBugReport
+    decision: HumanApprovalDecision
+
+
+class HumanApprovalExecutor(Executor):
+    """Pause the workflow for a typed human approval decision."""
+
+    def __init__(self) -> None:
+        super().__init__(id="request_human_approval_executor")
+
+    @handler
+    async def request_approval(
+        self,
+        routed_report: RoutedBugReport,
+        ctx: WorkflowContext[HumanApprovalOutcome, WorkflowResult],
+    ) -> None:
+        waiting_result = WorkflowResult(
+            status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            classification=routed_report.classification,
+            human_approval_required=True,
+            approval_granted=None,
+            final_action=None,
+            error=None,
+            event_log=[],
+        )
+        await ctx.yield_output(waiting_result)
+
+        await ctx.request_info(
+            request_data=HumanApprovalRequest(
+                routed_report=routed_report,
+                prompt=(
+                    "Approve or reject escalation of this bug report. "
+                    f"Category: {routed_report.classification.category.value}; "
+                    f"urgency: {routed_report.classification.urgency.value}; "
+                    f"sentiment: {routed_report.classification.sentiment.value}; "
+                    f"reasoning: {routed_report.classification.reasoning}; "
+                    f"route reason: "
+                    f"{routed_report.route_decision.reason or 'not provided'}."
+                ),
+            ),
+            response_type=HumanApprovalDecision,
+        )
+
+    @response_handler(
+        request=HumanApprovalRequest,
+        response=HumanApprovalDecision,
+        output=HumanApprovalOutcome,
+    )
+    async def handle_decision(
+        self,
+        original_request,
+        decision,
+        ctx,
+    ) -> None:
+        await ctx.send_message(
+            HumanApprovalOutcome(
+                routed_report=original_request.routed_report,
+                decision=decision,
+            )
+        )
+
+
 def _route_matches(expected_route: RouteName):
     """Create a switch-case predicate for a specific route."""
 
@@ -61,6 +140,18 @@ def _route_matches(expected_route: RouteName):
         return (
             isinstance(message, RoutedBugReport)
             and message.route_decision.selected_route == expected_route
+        )
+
+    return condition
+
+
+def _approval_matches(expected_approval: bool):
+    """Create a switch-case predicate for an approval outcome."""
+
+    def condition(message: Any) -> bool:
+        return (
+            isinstance(message, HumanApprovalOutcome)
+            and message.decision.approval_granted is expected_approval
         )
 
     return condition
@@ -159,17 +250,38 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
         )
         await ctx.yield_output(result)
 
-    @executor(id="request_human_approval_executor")
-    async def request_human_approval_executor(
-        routed_report: RoutedBugReport,
+    human_approval_executor = HumanApprovalExecutor()
+
+    @executor(id="create_escalation_ticket_executor")
+    async def create_escalation_ticket_executor(
+        outcome: HumanApprovalOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         result = WorkflowResult(
-            status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
-            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            classification=routed_report.classification,
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_ESCALATION_TICKET,
+            classification=outcome.routed_report.classification,
             human_approval_required=True,
-            approval_granted=None,
+            approval_granted=True,
+            final_action=(
+                "Create an escalation ticket for human-reviewed handling."
+            ),
+            error=None,
+            event_log=[],
+        )
+        await ctx.yield_output(result)
+
+    @executor(id="log_rejection_executor")
+    async def log_rejection_executor(
+        outcome: HumanApprovalOutcome,
+        ctx: WorkflowContext[Never, WorkflowResult],
+    ) -> None:
+        result = WorkflowResult(
+            status=WorkflowStatus.REJECTED,
+            selected_route=RouteName.LOG_REJECTION,
+            classification=outcome.routed_report.classification,
+            human_approval_required=True,
+            approval_granted=False,
             final_action=None,
             error=None,
             event_log=[],
@@ -206,7 +318,9 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
             output_from=[
                 request_more_info_executor,
                 create_standard_ticket_executor,
-                request_human_approval_executor,
+                human_approval_executor,
+                create_escalation_ticket_executor,
+                log_rejection_executor,
                 unexpected_route_executor,
             ],
         )
@@ -225,9 +339,19 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 ),
                 Case(
                     condition=_route_matches(RouteName.REQUEST_HUMAN_APPROVAL),
-                    target=request_human_approval_executor,
+                    target=human_approval_executor,
                 ),
                 Default(target=unexpected_route_executor),
+            ],
+        )
+        .add_switch_case_edge_group(
+            human_approval_executor,
+            [
+                Case(
+                    condition=_approval_matches(True),
+                    target=create_escalation_ticket_executor,
+                ),
+                Default(target=log_rejection_executor),
             ],
         )
         .build()
