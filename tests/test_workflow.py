@@ -324,6 +324,40 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
     ]
 
 
+def test_workflow_returns_failed_result_for_preprocessing_validation_error(
+    monkeypatch,
+):
+    def raise_preprocessing_error(raw_text: str):
+        raise ValueError("Invalid bug report input.")
+
+    monkeypatch.setattr(
+        workflow_module,
+        "preprocess_bug_report",
+        raise_preprocessing_error,
+    )
+
+    result = asyncio.run(
+        run_bug_triage_workflow(
+            "Invalid bug report.",
+            lambda prompt: make_llm_response(),
+        )
+    )
+
+    print_workflow_result("failed preprocessing workflow", result)
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.error == (
+        "Bug preprocessing failed: Invalid bug report input."
+    )
+    assert result.final_action is None
+    assert [event.status for event in result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.FAILED,
+    ]
+    assert result.event_log[-1].executor == "preprocess_executor"
+    assert result.event_log[-1].data["error_type"] == "ValueError"
+
+
 def test_workflow_returns_failed_result_for_invalid_classifier_output():
     result = asyncio.run(
         run_bug_triage_workflow(
@@ -346,8 +380,39 @@ def test_workflow_returns_failed_result_for_invalid_classifier_output():
         WorkflowStatus.PREPROCESSED,
         WorkflowStatus.FAILED,
     ]
+    assert result.event_log[-1].executor == "classifier_executor"
+    assert result.event_log[-1].data["error_type"] == "ValidationError"
 
 
+def test_workflow_returns_failed_result_for_unexpected_llm_client_error():
+    def raise_client_error(prompt: str):
+        raise RuntimeError("LLM provider unavailable.")
+
+    result = asyncio.run(
+        run_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            raise_client_error,
+        )
+    )
+
+    print_workflow_result("failed LLM client workflow", result)
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.error == (
+        "Bug classification failed: LLM provider unavailable."
+    )
+    assert result.final_action is None
+    assert [event.status for event in result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.FAILED,
+    ]
+    assert result.event_log[-1].executor == "classifier_executor"
+    assert result.event_log[-1].data["error_type"] == "RuntimeError"
 
 def test_workflow_stream_emits_final_workflow_result():
     async def collect_events():

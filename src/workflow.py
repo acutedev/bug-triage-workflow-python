@@ -217,6 +217,7 @@ def _completed_result(
     routed_report: RoutedBugReport,
     *,
     final_action: str,
+    executor: str,
     human_approval_required: bool = False,
 ) -> WorkflowResult:
     """Build a validated completed workflow result."""
@@ -234,19 +235,49 @@ def _completed_result(
             _workflow_event(
                 WorkflowStatus.COMPLETED,
                 final_action,
-                routed_report.route_decision.selected_route.value,
+                executor,
             ),
         ],
     )
 
 
 def _failed_result(
-    preprocessed_report: PreprocessedBugReport,
     error: Exception,
+    *,
+    stage: str,
+    executor: str,
+    preprocessed_report: PreprocessedBugReport | None = None,
 ) -> WorkflowResult:
-    """Build a validated terminal result for a classifier failure."""
+    """Build a validated terminal result for an expected workflow failure."""
 
-    error_message = f"Bug classification failed: {error}"
+    error_message = f"Bug {stage} failed: {error}"
+    event_log = [
+        _workflow_event(
+            WorkflowStatus.RECEIVED,
+            "Bug report received.",
+            "preprocess_executor",
+        )
+    ]
+
+    if preprocessed_report is not None:
+        event_log.append(
+            _workflow_event(
+                WorkflowStatus.PREPROCESSED,
+                "Bug report preprocessed.",
+                "preprocess_executor",
+                missing_info=preprocessed_report.missing_info,
+            )
+        )
+
+    event_log.append(
+        _workflow_event(
+            WorkflowStatus.FAILED,
+            error_message,
+            executor,
+            error_type=type(error).__name__,
+        )
+    )
+
     return WorkflowResult(
         status=WorkflowStatus.FAILED,
         selected_route=None,
@@ -255,24 +286,7 @@ def _failed_result(
         approval_granted=None,
         final_action=None,
         error=error_message,
-        event_log=[
-            _workflow_event(
-                WorkflowStatus.RECEIVED,
-                "Bug report received.",
-                "preprocess_executor",
-            ),
-            _workflow_event(
-                WorkflowStatus.PREPROCESSED,
-                "Bug report preprocessed.",
-                "preprocess_executor",
-                missing_info=preprocessed_report.missing_info,
-            ),
-            _workflow_event(
-                WorkflowStatus.FAILED,
-                error_message,
-                "classifier_executor",
-            ),
-        ],
+        event_log=event_log,
     )
 
 
@@ -286,9 +300,20 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
     @executor(id="preprocess_executor")
     async def preprocess_executor(
         raw_text: str,
-        ctx: WorkflowContext[PreprocessedBugReport],
+        ctx: WorkflowContext[PreprocessedBugReport, WorkflowResult],
     ) -> None:
-        preprocessed_report = preprocess_bug_report(raw_text)
+        try:
+            preprocessed_report = preprocess_bug_report(raw_text)
+        except ValueError as error:
+            await ctx.yield_output(
+                _failed_result(
+                    error,
+                    stage="preprocessing",
+                    executor="preprocess_executor",
+                )
+            )
+            return
+
         await ctx.send_message(preprocessed_report)
 
     @executor(id="classifier_executor")
@@ -302,9 +327,14 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 preprocessed_report,
                 llm_client,
             )
-        except ValueError as error:
+        except Exception as error:
             await ctx.yield_output(
-                _failed_result(preprocessed_report, error)
+                _failed_result(
+                    error,
+                    stage="classification",
+                    executor="classifier_executor",
+                    preprocessed_report=preprocessed_report,
+                )
             )
             return
 
@@ -341,6 +371,7 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
         result = _completed_result(
             routed_report,
             final_action="Request additional information from the bug reporter.",
+            executor="request_more_info_executor",
         )
         await ctx.yield_output(result)
 
@@ -352,6 +383,7 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
         result = _completed_result(
             routed_report,
             final_action="Create a standard bug ticket.",
+            executor="create_standard_ticket_executor",
         )
         await ctx.yield_output(result)
 
@@ -462,6 +494,7 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 "Preprocesses, classifies, and deterministically routes bug reports."
             ),
             output_from=[
+                preprocess_executor,
                 classifier_executor,
                 request_more_info_executor,
                 create_standard_ticket_executor,
