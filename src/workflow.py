@@ -34,6 +34,7 @@ from src.models import (
     RouteDecision,
     RouteName,
     TriageClassification,
+    WorkflowEvent,
     WorkflowResult,
     WorkflowStatus,
 )
@@ -94,7 +95,14 @@ class HumanApprovalExecutor(Executor):
             approval_granted=None,
             final_action=None,
             error=None,
-            event_log=[],
+            event_log=[
+                *_base_event_log(routed_report),
+                _workflow_event(
+                    WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+                    "Waiting for human approval.",
+                    "request_human_approval_executor",
+                ),
+            ],
         )
         await ctx.yield_output(waiting_result)
 
@@ -157,6 +165,54 @@ def _approval_matches(expected_approval: bool):
     return condition
 
 
+def _workflow_event(
+    status: WorkflowStatus,
+    message: str,
+    executor: str,
+    **data: Any,
+) -> WorkflowEvent:
+    """Create one structured workflow trace entry."""
+
+    return WorkflowEvent(
+        status=status,
+        message=message,
+        executor=executor,
+        data=data,
+    )
+
+
+def _base_event_log(routed_report: RoutedBugReport) -> list[WorkflowEvent]:
+    """Build the shared trace for a successfully routed bug report."""
+
+    return [
+        _workflow_event(
+            WorkflowStatus.RECEIVED,
+            "Bug report received.",
+            "preprocess_executor",
+        ),
+        _workflow_event(
+            WorkflowStatus.PREPROCESSED,
+            "Bug report preprocessed.",
+            "preprocess_executor",
+            missing_info=routed_report.preprocessed_report.missing_info,
+        ),
+        _workflow_event(
+            WorkflowStatus.CLASSIFIED,
+            "Bug report classified.",
+            "classifier_executor",
+            category=routed_report.classification.category.value,
+            urgency=routed_report.classification.urgency.value,
+            sentiment=routed_report.classification.sentiment.value,
+        ),
+        _workflow_event(
+            WorkflowStatus.ROUTED,
+            "Bug report routed.",
+            "router_executor",
+            selected_route=routed_report.route_decision.selected_route.value,
+        ),
+    ]
+
+
 def _completed_result(
     routed_report: RoutedBugReport,
     *,
@@ -173,13 +229,24 @@ def _completed_result(
         approval_granted=None,
         final_action=final_action,
         error=None,
-        event_log=[],
+        event_log=[
+            *_base_event_log(routed_report),
+            _workflow_event(
+                WorkflowStatus.COMPLETED,
+                final_action,
+                routed_report.route_decision.selected_route.value,
+            ),
+        ],
     )
 
 
-def _failed_result(error: Exception) -> WorkflowResult:
-    """Build a validated terminal result for an expected classifier failure."""
+def _failed_result(
+    preprocessed_report: PreprocessedBugReport,
+    error: Exception,
+) -> WorkflowResult:
+    """Build a validated terminal result for a classifier failure."""
 
+    error_message = f"Bug classification failed: {error}"
     return WorkflowResult(
         status=WorkflowStatus.FAILED,
         selected_route=None,
@@ -187,8 +254,25 @@ def _failed_result(error: Exception) -> WorkflowResult:
         human_approval_required=False,
         approval_granted=None,
         final_action=None,
-        error=f"Bug classification failed: {error}",
-        event_log=[],
+        error=error_message,
+        event_log=[
+            _workflow_event(
+                WorkflowStatus.RECEIVED,
+                "Bug report received.",
+                "preprocess_executor",
+            ),
+            _workflow_event(
+                WorkflowStatus.PREPROCESSED,
+                "Bug report preprocessed.",
+                "preprocess_executor",
+                missing_info=preprocessed_report.missing_info,
+            ),
+            _workflow_event(
+                WorkflowStatus.FAILED,
+                error_message,
+                "classifier_executor",
+            ),
+        ],
     )
 
 
@@ -219,7 +303,9 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 llm_client,
             )
         except ValueError as error:
-            await ctx.yield_output(_failed_result(error))
+            await ctx.yield_output(
+                _failed_result(preprocessed_report, error)
+            )
             return
 
         await ctx.send_message(
@@ -286,7 +372,25 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 "Create an escalation ticket for human-reviewed handling."
             ),
             error=None,
-            event_log=[],
+            event_log=[
+                *_base_event_log(outcome.routed_report),
+                _workflow_event(
+                    WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+                    "Waiting for human approval.",
+                    "request_human_approval_executor",
+                ),
+                _workflow_event(
+                    WorkflowStatus.APPROVED,
+                    "Human reviewer approved escalation.",
+                    "request_human_approval_executor",
+                    approver=outcome.decision.approver,
+                ),
+                _workflow_event(
+                    WorkflowStatus.COMPLETED,
+                    "Escalation ticket created.",
+                    "create_escalation_ticket_executor",
+                ),
+            ],
         )
         await ctx.yield_output(result)
 
@@ -303,7 +407,20 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
             approval_granted=False,
             final_action=None,
             error=None,
-            event_log=[],
+            event_log=[
+                *_base_event_log(outcome.routed_report),
+                _workflow_event(
+                    WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+                    "Waiting for human approval.",
+                    "request_human_approval_executor",
+                ),
+                _workflow_event(
+                    WorkflowStatus.REJECTED,
+                    "Human reviewer rejected escalation.",
+                    "log_rejection_executor",
+                    approver=outcome.decision.approver,
+                ),
+            ],
         )
         await ctx.yield_output(result)
 
@@ -323,7 +440,17 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 "No Microsoft Agent Framework branch was configured for route "
                 f"{routed_report.route_decision.selected_route.value}."
             ),
-            event_log=[],
+            event_log=[
+                *_base_event_log(routed_report),
+                _workflow_event(
+                    WorkflowStatus.FAILED,
+                    "No workflow branch was configured for the selected route.",
+                    "unexpected_route_executor",
+                    selected_route=(
+                        routed_report.route_decision.selected_route.value
+                    ),
+                ),
+            ],
         )
         await ctx.yield_output(result)
 

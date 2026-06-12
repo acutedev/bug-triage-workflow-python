@@ -46,6 +46,17 @@ def security_bug_report() -> str:
     )
 
 
+def print_workflow_result(label: str, result: WorkflowResult) -> None:
+    print(f"\n=== {label} ===")
+    for event in result.event_log:
+        print(
+            f"{event.status.value} | "
+            f"{event.executor} | "
+            f"{event.message} | "
+            f"{event.data}"
+        )
+
+
 def test_build_bug_triage_workflow_contains_expected_executors():
     workflow = build_bug_triage_workflow(
         lambda prompt: make_llm_response()
@@ -88,6 +99,8 @@ def test_workflow_runs_classifier_in_worker_thread(monkeypatch):
         )
     )
 
+    print_workflow_result("worker-thread workflow", result)
+
     assert result.status == WorkflowStatus.COMPLETED
     assert len(to_thread_calls) == 1
     called_function, called_args, called_kwargs = to_thread_calls[0]
@@ -116,10 +129,19 @@ def test_workflow_creates_standard_ticket_for_complete_safe_report():
         )
     )
 
+    print_workflow_result("standard ticket workflow", result)
+
     assert result.status == WorkflowStatus.COMPLETED
     assert result.selected_route == RouteName.CREATE_STANDARD_TICKET
     assert result.final_action == "Create a standard bug ticket."
     assert result.human_approval_required is False
+    assert [event.status for event in result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
 
 
 def test_workflow_requests_more_information_when_report_is_incomplete():
@@ -136,11 +158,20 @@ def test_workflow_requests_more_information_when_report_is_incomplete():
         )
     )
 
+    print_workflow_result("request more info workflow", result)
+
     assert result.status == WorkflowStatus.COMPLETED
     assert result.selected_route == RouteName.REQUEST_MORE_INFO
     assert result.final_action == (
         "Request additional information from the bug reporter."
     )
+    assert [event.status for event in result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
 
 
 def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
@@ -193,6 +224,9 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
         if isinstance(getattr(event, "data", None), WorkflowResult)
     )
 
+    print_workflow_result("waiting for human approval", waiting_result)
+    print_workflow_result("approved human review", final_result)
+
     assert waiting_result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
     assert waiting_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
     assert waiting_result.human_approval_required is True
@@ -206,6 +240,15 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
     assert final_result.final_action == (
         "Create an escalation ticket for human-reviewed handling."
     )
+    assert [event.status for event in final_result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+        WorkflowStatus.APPROVED,
+        WorkflowStatus.COMPLETED,
+    ]
 
 
 def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
@@ -258,6 +301,9 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
         if isinstance(getattr(event, "data", None), WorkflowResult)
     )
 
+    print_workflow_result("waiting for human approval", waiting_result)
+    print_workflow_result("rejected human review", final_result)
+
     assert waiting_result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
     assert waiting_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
     assert waiting_result.human_approval_required is True
@@ -268,6 +314,14 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
     assert final_result.human_approval_required is True
     assert final_result.approval_granted is False
     assert final_result.final_action is None
+    assert [event.status for event in final_result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+        WorkflowStatus.REJECTED,
+    ]
 
 
 def test_workflow_returns_failed_result_for_invalid_classifier_output():
@@ -282,9 +336,18 @@ def test_workflow_returns_failed_result_for_invalid_classifier_output():
         )
     )
 
+    print_workflow_result("failed classifier workflow", result)
+
     assert result.status == WorkflowStatus.FAILED
     assert result.error
     assert result.final_action is None
+    assert [event.status for event in result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.FAILED,
+    ]
+
+
 
 def test_workflow_stream_emits_final_workflow_result():
     async def collect_events():
@@ -300,6 +363,19 @@ def test_workflow_stream_emits_final_workflow_result():
         return [event async for event in stream]
 
     events = asyncio.run(collect_events())
+
+    print("\n=== raw MAF stream events ===")
+    for event in events:
+        source_executor_id = (
+            event.source_executor_id
+            if event.type == "request_info"
+            else None
+        )
+        print(
+            f"{event.type} | "
+            f"{source_executor_id} | "
+            f"{getattr(event, 'data', None)}"
+        )
 
     assert events
     assert any(
