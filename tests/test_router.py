@@ -2,6 +2,8 @@
 
 import logging
 
+import pytest
+
 from src.models import (
     BugCategory,
     PreprocessedBugReport,
@@ -140,6 +142,30 @@ def test_high_urgency_neutral_sentiment_does_not_require_human_approval():
         category=BugCategory.AUTHENTICATION,
         urgency=Urgency.HIGH,
         sentiment=Sentiment.NEUTRAL,
+        recommended_route=RouteName.CREATE_STANDARD_TICKET,
+    )
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.CREATE_STANDARD_TICKET
+
+
+@pytest.mark.parametrize(
+    ("urgency", "sentiment"),
+    [
+        (Urgency.LOW, Sentiment.ANGRY),
+        (Urgency.MEDIUM, Sentiment.ANGRY),
+        (Urgency.HIGH, Sentiment.CONFUSED),
+    ],
+)
+def test_non_risky_boundary_combinations_do_not_require_human_approval(
+    urgency: Urgency,
+    sentiment: Sentiment,
+):
+    classification = make_classification(
+        category=BugCategory.AUTHENTICATION,
+        urgency=urgency,
+        sentiment=sentiment,
         recommended_route=RouteName.CREATE_STANDARD_TICKET,
     )
 
