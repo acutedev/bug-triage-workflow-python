@@ -270,6 +270,22 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
     assert final_result.final_action is None
 
 
+def test_workflow_returns_failed_result_for_invalid_classifier_output():
+    result = asyncio.run(
+        run_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            lambda prompt: {"invalid": "classifier response"},
+        )
+    )
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.error
+    assert result.final_action is None
+
 def test_workflow_stream_emits_final_workflow_result():
     async def collect_events():
         stream = stream_bug_triage_workflow(

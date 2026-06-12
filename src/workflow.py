@@ -177,6 +177,21 @@ def _completed_result(
     )
 
 
+def _failed_result(error: Exception) -> WorkflowResult:
+    """Build a validated terminal result for an expected classifier failure."""
+
+    return WorkflowResult(
+        status=WorkflowStatus.FAILED,
+        selected_route=None,
+        classification=None,
+        human_approval_required=False,
+        approval_granted=None,
+        final_action=None,
+        error=f"Bug classification failed: {error}",
+        event_log=[],
+    )
+
+
 def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
     """Build a fresh Microsoft Agent Framework bug triage workflow.
 
@@ -195,13 +210,17 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
     @executor(id="classifier_executor")
     async def classifier_executor(
         preprocessed_report: PreprocessedBugReport,
-        ctx: WorkflowContext[ClassifiedBugReport],
+        ctx: WorkflowContext[ClassifiedBugReport, WorkflowResult],
     ) -> None:
-        classification = await asyncio.to_thread(
-            classify_bug_report,
-            preprocessed_report,
-            llm_client,
-        )
+        try:
+            classification = await asyncio.to_thread(
+                classify_bug_report,
+                preprocessed_report,
+                llm_client,
+            )
+        except ValueError as error:
+            await ctx.yield_output(_failed_result(error))
+            return
 
         await ctx.send_message(
             ClassifiedBugReport(
@@ -316,6 +335,7 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 "Preprocesses, classifies, and deterministically routes bug reports."
             ),
             output_from=[
+                classifier_executor,
                 request_more_info_executor,
                 create_standard_ticket_executor,
                 human_approval_executor,
