@@ -79,6 +79,23 @@ def test_build_bug_triage_workflow_contains_expected_executors():
     }
 
 
+def test_workflow_uses_direct_escalation_graph_when_approval_is_disabled():
+    workflow = build_bug_triage_workflow(
+        lambda prompt: make_llm_response(),
+        human_approval_enabled=False,
+    )
+
+    executor_ids = {
+        workflow_executor.id
+        for workflow_executor in workflow.get_executors_list()
+    }
+
+    assert "create_direct_escalation_ticket_executor" in executor_ids
+    assert "request_human_approval_executor" not in executor_ids
+    assert "create_escalation_ticket_executor" not in executor_ids
+    assert "log_rejection_executor" not in executor_ids
+
+
 def test_workflow_runs_classifier_in_worker_thread(monkeypatch):
     to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
 
@@ -324,6 +341,84 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
     ]
 
 
+def test_risky_report_escalates_directly_when_human_approval_is_disabled():
+    result = asyncio.run(
+        run_bug_triage_workflow(
+            security_bug_report(),
+            lambda prompt: make_llm_response(
+                category=BugCategory.SECURITY,
+                urgency=Urgency.CRITICAL,
+                sentiment=Sentiment.NEUTRAL,
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            ),
+            human_approval_enabled=False,
+        )
+    )
+
+    print_workflow_result("direct escalation workflow", result)
+
+    assert result.status == WorkflowStatus.COMPLETED
+    assert result.selected_route == RouteName.CREATE_ESCALATION_TICKET
+    assert result.human_approval_required is False
+    assert result.approval_granted is None
+    assert result.final_action == (
+        "Create an escalation ticket directly because human approval "
+        "is disabled by configuration."
+    )
+    assert [event.status for event in result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert (
+        result.event_log[-1].executor
+        == "create_direct_escalation_ticket_executor"
+    )
+    assert result.event_log[-1].data["human_approval_enabled"] is False
+    assert (
+        result.event_log[-1].data["policy_route"]
+        == RouteName.REQUEST_HUMAN_APPROVAL.value
+    )
+    assert (
+        result.event_log[-1].data["effective_route"]
+        == RouteName.CREATE_ESCALATION_TICKET.value
+    )
+
+
+def test_disabled_human_approval_stream_does_not_request_information():
+    async def collect_events():
+        stream = stream_bug_triage_workflow(
+            security_bug_report(),
+            lambda prompt: make_llm_response(
+                category=BugCategory.SECURITY,
+                urgency=Urgency.CRITICAL,
+                sentiment=Sentiment.NEUTRAL,
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            ),
+            human_approval_enabled=False,
+        )
+
+        return [event async for event in stream]
+
+    events = asyncio.run(collect_events())
+
+    assert events
+    assert all(event.type != "request_info" for event in events)
+
+    final_result = next(
+        event.data
+        for event in events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    )
+
+    assert final_result.status == WorkflowStatus.COMPLETED
+    assert final_result.selected_route == RouteName.CREATE_ESCALATION_TICKET
+    assert final_result.human_approval_required is False
+    assert final_result.approval_granted is None
+
+
 def test_workflow_returns_failed_result_for_preprocessing_validation_error(
     monkeypatch,
 ):
@@ -413,6 +508,7 @@ def test_workflow_returns_failed_result_for_unexpected_llm_client_error():
     ]
     assert result.event_log[-1].executor == "classifier_executor"
     assert result.event_log[-1].data["error_type"] == "RuntimeError"
+
 
 def test_workflow_stream_emits_final_workflow_result():
     async def collect_events():

@@ -290,7 +290,11 @@ def _failed_result(
     )
 
 
-def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
+def build_bug_triage_workflow(
+    llm_client: LLMClassifierClient,
+    *,
+    human_approval_enabled: bool = True,
+) -> Workflow:
     """Build a fresh Microsoft Agent Framework bug triage workflow.
 
     A fresh workflow is created for each run so executor state cannot leak
@@ -389,6 +393,41 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
 
     human_approval_executor = HumanApprovalExecutor()
 
+    @executor(id="create_direct_escalation_ticket_executor")
+    async def create_direct_escalation_ticket_executor(
+        routed_report: RoutedBugReport,
+        ctx: WorkflowContext[Never, WorkflowResult],
+    ) -> None:
+        final_action = (
+            "Create an escalation ticket directly because human approval "
+            "is disabled by configuration."
+        )
+        result = WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_ESCALATION_TICKET,
+            classification=routed_report.classification,
+            human_approval_required=False,
+            approval_granted=None,
+            final_action=final_action,
+            error=None,
+            event_log=[
+                *_base_event_log(routed_report),
+                _workflow_event(
+                    WorkflowStatus.COMPLETED,
+                    final_action,
+                    "create_direct_escalation_ticket_executor",
+                    human_approval_enabled=False,
+                    policy_route=(
+                        routed_report.route_decision.selected_route.value
+                    ),
+                    effective_route=(
+                        RouteName.CREATE_ESCALATION_TICKET.value
+                    ),
+                ),
+            ],
+        )
+        await ctx.yield_output(result)
+
     @executor(id="create_escalation_ticket_executor")
     async def create_escalation_ticket_executor(
         outcome: HumanApprovalOutcome,
@@ -486,23 +525,39 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
         )
         await ctx.yield_output(result)
 
-    return (
+    human_approval_target = (
+        human_approval_executor
+        if human_approval_enabled
+        else create_direct_escalation_ticket_executor
+    )
+
+    output_executors = [
+        preprocess_executor,
+        classifier_executor,
+        request_more_info_executor,
+        create_standard_ticket_executor,
+        unexpected_route_executor,
+    ]
+
+    if human_approval_enabled:
+        output_executors.extend(
+            [
+                human_approval_executor,
+                create_escalation_ticket_executor,
+                log_rejection_executor,
+            ]
+        )
+    else:
+        output_executors.append(create_direct_escalation_ticket_executor)
+
+    workflow_builder = (
         WorkflowBuilder(
             start_executor=preprocess_executor,
             name="bug_triage_workflow",
             description=(
                 "Preprocesses, classifies, and deterministically routes bug reports."
             ),
-            output_from=[
-                preprocess_executor,
-                classifier_executor,
-                request_more_info_executor,
-                create_standard_ticket_executor,
-                human_approval_executor,
-                create_escalation_ticket_executor,
-                log_rejection_executor,
-                unexpected_route_executor,
-            ],
+            output_from=output_executors,
         )
         .add_edge(preprocess_executor, classifier_executor)
         .add_edge(classifier_executor, router_executor)
@@ -519,12 +574,15 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 ),
                 Case(
                     condition=_route_matches(RouteName.REQUEST_HUMAN_APPROVAL),
-                    target=human_approval_executor,
+                    target=human_approval_target,
                 ),
                 Default(target=unexpected_route_executor),
             ],
         )
-        .add_switch_case_edge_group(
+    )
+
+    if human_approval_enabled:
+        workflow_builder = workflow_builder.add_switch_case_edge_group(
             human_approval_executor,
             [
                 Case(
@@ -534,17 +592,22 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
                 Default(target=log_rejection_executor),
             ],
         )
-        .build()
-    )
+
+    return workflow_builder.build()
 
 
 async def run_bug_triage_workflow(
     raw_text: str,
     llm_client: LLMClassifierClient,
+    *,
+    human_approval_enabled: bool = True,
 ) -> WorkflowResult:
     """Run the workflow and return its single validated output."""
 
-    workflow = build_bug_triage_workflow(llm_client)
+    workflow = build_bug_triage_workflow(
+        llm_client,
+        human_approval_enabled=human_approval_enabled,
+    )
     run_result = await workflow.run(raw_text)
     outputs = run_result.get_outputs()
 
@@ -563,10 +626,15 @@ async def run_bug_triage_workflow(
 def stream_bug_triage_workflow(
     raw_text: str,
     llm_client: LLMClassifierClient,
+    *,
+    human_approval_enabled: bool = True,
 ):
     """Return a Microsoft Agent Framework event stream for the workflow."""
 
-    workflow = build_bug_triage_workflow(llm_client)
+    workflow = build_bug_triage_workflow(
+        llm_client,
+        human_approval_enabled=human_approval_enabled,
+    )
     return workflow.run(
         raw_text,
         stream=True,

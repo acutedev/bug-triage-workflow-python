@@ -239,7 +239,14 @@ class WorkflowResult(StrictBaseModel):
             if not self.human_approval_required or self.approval_granted is not False:
                 raise ValueError("rejected status requires human approval to be rejected")
 
-        if self.selected_route == RouteName.CREATE_ESCALATION_TICKET and self.approval_granted is not True:
-            raise ValueError("create_escalation_ticket route requires granted approval")
+        if (
+            self.selected_route == RouteName.CREATE_ESCALATION_TICKET
+            and self.human_approval_required
+            and self.approval_granted is not True
+        ):
+            raise ValueError(
+                "create_escalation_ticket route requires granted approval "
+                "when human approval is required"
+            )
 
         return self

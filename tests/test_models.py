@@ -460,3 +460,18 @@ def test_escalation_ticket_route_with_granted_approval_is_valid():
     )
     assert result.selected_route == RouteName.CREATE_ESCALATION_TICKET
     assert result.approval_granted is True
+
+
+def test_direct_escalation_without_required_approval_is_valid():
+    result = WorkflowResult(
+        status=WorkflowStatus.COMPLETED,
+        selected_route=RouteName.CREATE_ESCALATION_TICKET,
+        human_approval_required=False,
+        approval_granted=None,
+        final_action="Created escalation ticket directly.",
+    )
+
+    assert result.selected_route == RouteName.CREATE_ESCALATION_TICKET
+    assert result.human_approval_required is False
+    assert result.approval_granted is None
+    assert result.final_action == "Created escalation ticket directly."
