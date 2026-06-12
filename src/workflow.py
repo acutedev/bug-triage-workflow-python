@@ -10,6 +10,7 @@ module is responsible only for Microsoft Agent Framework orchestration.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Any
 
@@ -105,7 +106,11 @@ def build_bug_triage_workflow(llm_client: LLMClassifierClient) -> Workflow:
         preprocessed_report: PreprocessedBugReport,
         ctx: WorkflowContext[ClassifiedBugReport],
     ) -> None:
-        classification = classify_bug_report(preprocessed_report, llm_client)
+        classification = await asyncio.to_thread(
+            classify_bug_report,
+            preprocessed_report,
+            llm_client,
+        )
 
         await ctx.send_message(
             ClassifiedBugReport(

@@ -2,6 +2,7 @@
 
 import asyncio
 
+import src.workflow as workflow_module
 from src.models import (
     BugCategory,
     RouteName,
@@ -46,6 +47,7 @@ def test_build_bug_triage_workflow_contains_expected_executors():
         for workflow_executor in workflow.get_executors_list()
     }
 
+
     assert executor_ids == {
         "preprocess_executor",
         "classifier_executor",
@@ -55,6 +57,35 @@ def test_build_bug_triage_workflow_contains_expected_executors():
         "request_human_approval_executor",
         "unexpected_route_executor",
     }
+
+
+def test_workflow_runs_classifier_in_worker_thread(monkeypatch):
+    to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(func, *args, **kwargs):
+        to_thread_calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(workflow_module.asyncio, "to_thread", fake_to_thread)
+
+    result = asyncio.run(
+        run_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            lambda prompt: make_llm_response(),
+        )
+    )
+
+    assert result.status == WorkflowStatus.COMPLETED
+    assert len(to_thread_calls) == 1
+    called_function, called_args, called_kwargs = to_thread_calls[0]
+    assert getattr(called_function, "__name__", None) == "classify_bug_report"
+    assert called_args[0].normalized_text.startswith("In production on Chrome")
+    assert callable(called_args[1])
+    assert called_kwargs == {}
 
 
 def test_workflow_creates_standard_ticket_for_complete_safe_report():
