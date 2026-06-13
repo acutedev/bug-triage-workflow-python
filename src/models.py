@@ -228,6 +228,9 @@ class WorkflowResult(StrictBaseModel):
         if self.status == WorkflowStatus.FAILED and self.final_action is not None:
             raise ValueError("final_action must be None when status is failed")
 
+        if self.status == WorkflowStatus.FAILED and self.approval_granted is not None:
+            raise ValueError("approval_granted must be None when status is failed")
+
         if self.status == WorkflowStatus.COMPLETED and not self.final_action:
             raise ValueError("final_action is required when status is completed")
 
@@ -240,6 +243,18 @@ class WorkflowResult(StrictBaseModel):
         if self.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL and not self.human_approval_required:
             raise ValueError("human_approval_required must be true while waiting for approval")
 
+        if self.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL:
+            if self.approval_granted is not None:
+                raise ValueError(
+                    "approval_granted must be None while waiting for approval"
+                )
+            if self.final_action is not None:
+                raise ValueError(
+                    "final_action must be None while waiting for approval"
+                )
+            if self.error is not None:
+                raise ValueError("error must be None while waiting for approval")
+
         if self.status == WorkflowStatus.APPROVED:
             if not self.human_approval_required or self.approval_granted is not True:
                 raise ValueError("approved status requires human approval to be granted")
@@ -247,6 +262,10 @@ class WorkflowResult(StrictBaseModel):
         if self.status == WorkflowStatus.REJECTED:
             if not self.human_approval_required or self.approval_granted is not False:
                 raise ValueError("rejected status requires human approval to be rejected")
+            if self.final_action is not None:
+                raise ValueError("final_action must be None when status is rejected")
+            if self.error is not None:
+                raise ValueError("error must be None when status is rejected")
 
         if (
             self.selected_route == RouteName.CREATE_ESCALATION_TICKET

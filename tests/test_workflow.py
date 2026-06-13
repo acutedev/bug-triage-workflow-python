@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterable, Awaitable, Sequence
 from typing import Any
 
+import pytest
 from agent_framework import (
     Agent,
     ChatResponse,
@@ -143,6 +144,18 @@ def print_workflow_result(label: str, result: WorkflowResult) -> None:
             f"{event.message} | "
             f"{event.data}"
         )
+
+
+def workflow_results_from_events(events: list[object]) -> list[WorkflowResult]:
+    return [
+        event.data
+        for event in events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    ]
+
+
+def workflow_statuses(result: WorkflowResult) -> list[WorkflowStatus]:
+    return [event.status for event in result.event_log]
 
 
 def test_build_bug_triage_workflow_contains_expected_executors():
@@ -360,6 +373,14 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
         WorkflowStatus.APPROVED,
         WorkflowStatus.COMPLETED,
     ]
+    for status in [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+    ]:
+        assert workflow_statuses(final_result).count(status) == 1
 
 
 def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
@@ -626,24 +647,66 @@ def test_workflow_stream_emits_failed_result_for_unexpected_llm_client_error():
 
     events = asyncio.run(collect_events())
 
-    final_result = next(
-        event.data
-        for event in events
-        if isinstance(getattr(event, "data", None), WorkflowResult)
-    )
+    workflow_results = workflow_results_from_events(events)
 
+    assert len(workflow_results) == 1
+    final_result = workflow_results[0]
     assert final_result.status == WorkflowStatus.FAILED
     assert final_result.error == (
         "Bug classification failed: LLM provider unavailable."
     )
     assert final_result.final_action is None
-    assert [event.status for event in final_result.event_log] == [
+    assert workflow_statuses(final_result) == [
         WorkflowStatus.RECEIVED,
         WorkflowStatus.PREPROCESSED,
         WorkflowStatus.FAILED,
     ]
     assert final_result.event_log[-1].executor == "classifier_agent"
     assert final_result.event_log[-1].data["error_type"] == "RuntimeError"
+
+
+def test_workflow_does_not_mislabel_router_exception_as_classifier_failure(
+    monkeypatch,
+):
+    def raise_router_error(classification, preprocessed_report):
+        raise RuntimeError("router policy failed")
+
+    monkeypatch.setattr(workflow_module, "route_triage", raise_router_error)
+
+    with pytest.raises(RuntimeError, match="router policy failed"):
+        asyncio.run(
+            run_bug_triage_workflow(
+                (
+                    "In production on Chrome using macOS, when I click save, "
+                    "the page shows an error instead of saving. "
+                    "It should save successfully."
+                ),
+                make_classifier_agent()[0],
+            )
+        )
+
+
+def test_workflow_stream_does_not_mislabel_router_exception_as_classifier_failure(
+    monkeypatch,
+):
+    def raise_router_error(classification, preprocessed_report):
+        raise RuntimeError("router policy failed")
+
+    monkeypatch.setattr(workflow_module, "route_triage", raise_router_error)
+
+    async def collect_events():
+        stream = stream_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            make_classifier_agent()[0],
+        )
+        return [event async for event in stream]
+
+    with pytest.raises(RuntimeError, match="router policy failed"):
+        asyncio.run(collect_events())
 
 
 def test_workflow_stream_emits_final_workflow_result():
@@ -675,7 +738,179 @@ def test_workflow_stream_emits_final_workflow_result():
         )
 
     assert events
-    assert any(
-        isinstance(getattr(event, "data", None), WorkflowResult)
-        for event in events
+    workflow_results = workflow_results_from_events(events)
+    assert len(workflow_results) == 1
+    final_result = workflow_results[0]
+    assert final_result.status == WorkflowStatus.COMPLETED
+    assert final_result.event_log[-1].status == WorkflowStatus.COMPLETED
+
+
+def test_separate_run_calls_do_not_share_trace_events():
+    first_result = asyncio.run(
+        run_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            make_classifier_agent()[0],
+        )
     )
+    second_result = asyncio.run(
+        run_bug_triage_workflow(
+            "The login page is broken.",
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.AUTHENTICATION,
+                    urgency=Urgency.MEDIUM,
+                    sentiment=Sentiment.CONFUSED,
+                    missing_info=["browser", "device_or_os"],
+                    recommended_route=RouteName.REQUEST_MORE_INFO,
+                )
+            )[0],
+        )
+    )
+
+    assert first_result.event_log is not second_result.event_log
+    assert workflow_statuses(first_result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert workflow_statuses(second_result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert first_result.selected_route == RouteName.CREATE_STANDARD_TICKET
+    assert second_result.selected_route == RouteName.REQUEST_MORE_INFO
+
+
+def test_separate_streaming_calls_do_not_share_trace_events():
+    async def collect_final_result(raw_text: str, classifier_agent: Agent):
+        events = [
+            event
+            async for event in stream_bug_triage_workflow(
+                raw_text,
+                classifier_agent,
+            )
+        ]
+        workflow_results = workflow_results_from_events(events)
+        assert len(workflow_results) == 1
+        return workflow_results[0]
+
+    first_result = asyncio.run(
+        collect_final_result(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            make_classifier_agent()[0],
+        )
+    )
+    second_result = asyncio.run(
+        collect_final_result(
+            "The login page is broken.",
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.AUTHENTICATION,
+                    urgency=Urgency.MEDIUM,
+                    sentiment=Sentiment.CONFUSED,
+                    missing_info=["browser", "device_or_os"],
+                    recommended_route=RouteName.REQUEST_MORE_INFO,
+                )
+            )[0],
+        )
+    )
+
+    assert workflow_statuses(first_result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert workflow_statuses(second_result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert first_result.selected_route == RouteName.CREATE_STANDARD_TICKET
+    assert second_result.selected_route == RouteName.REQUEST_MORE_INFO
+
+
+def test_concurrent_independent_runs_do_not_contaminate_trace_events():
+    async def run_scenario():
+        return await asyncio.gather(
+            run_bug_triage_workflow(
+                (
+                    "In production on Chrome using macOS, when I click save, "
+                    "the page shows an error instead of saving. "
+                    "It should save successfully."
+                ),
+                make_classifier_agent()[0],
+            ),
+            run_bug_triage_workflow(
+                "The login page is broken.",
+                make_classifier_agent(
+                    make_llm_response(
+                        category=BugCategory.AUTHENTICATION,
+                        urgency=Urgency.MEDIUM,
+                        sentiment=Sentiment.CONFUSED,
+                        missing_info=["browser", "device_or_os"],
+                        recommended_route=RouteName.REQUEST_MORE_INFO,
+                    )
+                )[0],
+            ),
+        )
+
+    first_result, second_result = asyncio.run(run_scenario())
+
+    assert first_result.event_log is not second_result.event_log
+    assert workflow_statuses(first_result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert workflow_statuses(second_result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert first_result.selected_route == RouteName.CREATE_STANDARD_TICKET
+    assert second_result.selected_route == RouteName.REQUEST_MORE_INFO
+
+
+def test_built_workflow_object_cannot_be_reused_for_unrelated_reports():
+    async def run_scenario():
+        workflow = build_bug_triage_workflow(make_classifier_agent()[0])
+
+        await workflow.run(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            )
+        )
+
+        with pytest.raises(RuntimeError, match="single-use"):
+            await workflow.run(
+                (
+                    "In production on Chrome using macOS, when I click delete, "
+                    "the page shows an error instead of deleting. "
+                    "It should delete successfully."
+                )
+            )
+
+    asyncio.run(run_scenario())

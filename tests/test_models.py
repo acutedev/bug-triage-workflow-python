@@ -262,6 +262,16 @@ def test_failed_workflow_result_with_final_action_rejected():
         )
 
 
+def test_failed_workflow_result_with_approval_granted_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.FAILED,
+            error="validation failure",
+            human_approval_required=True,
+            approval_granted=False,
+        )
+
+
 def test_completed_workflow_result_requires_final_action():
     with pytest.raises(ValidationError):
         WorkflowResult(status=WorkflowStatus.COMPLETED)
@@ -454,6 +464,27 @@ def test_waiting_for_human_approval_with_flag_is_valid():
     assert result.human_approval_required is True
 
 
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("approval_granted", False),
+        ("final_action", "Create an escalation ticket."),
+        ("error", "unexpected error"),
+    ],
+)
+def test_waiting_for_human_approval_rejects_terminal_fields(
+    field_name,
+    field_value,
+):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            human_approval_required=True,
+            **{field_name: field_value},
+        )
+
+
 def test_approval_granted_requires_human_approval_flag():
     with pytest.raises(ValidationError):
         WorkflowResult(
@@ -492,6 +523,24 @@ def test_rejected_status_requires_rejected_approval():
     )
     assert result.status == WorkflowStatus.REJECTED
     assert result.approval_granted is False
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("final_action", "Create an escalation ticket."),
+        ("error", "unexpected error"),
+    ],
+)
+def test_rejected_status_rejects_terminal_fields(field_name, field_value):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.REJECTED,
+            selected_route=RouteName.LOG_REJECTION,
+            human_approval_required=True,
+            approval_granted=False,
+            **{field_name: field_value},
+        )
 
 
 def test_rejected_status_with_granted_approval_rejected():

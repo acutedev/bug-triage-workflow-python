@@ -6,7 +6,11 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from src.classifier import build_classification_prompt, classify_bug_report
+from src.classifier import (
+    CLASSIFIER_AGENT_INSTRUCTIONS,
+    build_classification_prompt,
+    parse_classification_response,
+)
 from src.models import (
     BugCategory,
     PreprocessedBugReport,
@@ -42,35 +46,38 @@ def valid_llm_response() -> dict[str, object]:
     }
 
 
-def test_build_classification_prompt_includes_report_context_and_schema():
+def test_classifier_agent_instructions_hold_business_rules():
+    assert "TriageClassification" in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "request_more_info" in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "request_human_approval" in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "create_standard_ticket" in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "Do not invent missing information" in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "confidence score" in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "chain-of-thought" in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "category, urgency, sentiment" not in CLASSIFIER_AGENT_INSTRUCTIONS
+    assert "BUG_REPORT_JSON" not in CLASSIFIER_AGENT_INSTRUCTIONS
+
+
+def test_build_classification_prompt_includes_only_report_context():
     preprocessed_report = make_preprocessed_report()
 
     prompt = build_classification_prompt(preprocessed_report)
     marker = "BUG_REPORT_JSON:\n"
     payload = json.loads(prompt.split(marker, maxsplit=1)[1])
 
-    assert "Return only valid JSON" in prompt
+    assert prompt.startswith("Classify the following preprocessed bug report.")
     assert marker in prompt
     assert payload["raw_text"] == preprocessed_report.raw_text
     assert payload["normalized_text"] == preprocessed_report.normalized_text
     assert payload["extracted_fields"] == preprocessed_report.extracted_fields
     assert payload["preprocessor_missing_info"] == []
-    assert "authentication" in payload["schema"]["category"]
-    assert "request_human_approval" in payload["schema"]["recommended_route"]
-    assert "routing_guidance" in payload
+    assert "schema" not in payload
+    assert "routing_guidance" not in payload
 
 
-def test_classify_bug_report_accepts_mapping_response():
-    preprocessed_report = make_preprocessed_report()
-    prompts: list[str] = []
+def test_parse_classification_response_accepts_mapping_response():
+    classification = parse_classification_response(valid_llm_response())
 
-    def llm_client(prompt: str) -> dict[str, object]:
-        prompts.append(prompt)
-        return valid_llm_response()
-
-    classification = classify_bug_report(preprocessed_report, llm_client)
-
-    assert prompts
     assert classification.category == BugCategory.AUTHENTICATION
     assert classification.urgency == Urgency.HIGH
     assert classification.sentiment == Sentiment.FRUSTRATED
@@ -78,73 +85,51 @@ def test_classify_bug_report_accepts_mapping_response():
     assert classification.confidence == 0.91
 
 
-def test_classify_bug_report_accepts_json_string_response():
-    preprocessed_report = make_preprocessed_report()
-
-    classification = classify_bug_report(
-        preprocessed_report,
-        lambda prompt: json.dumps(valid_llm_response()),
-    )
+def test_parse_classification_response_accepts_json_string_response():
+    classification = parse_classification_response(json.dumps(valid_llm_response()))
 
     assert classification.category == BugCategory.AUTHENTICATION
     assert classification.reasoning == "Login crashes in production and blocks users."
 
 
-def test_classify_bug_report_rejects_invalid_json_string_response():
-    preprocessed_report = make_preprocessed_report()
-
+def test_parse_classification_response_rejects_invalid_json_string_response():
     with pytest.raises(ValueError, match="LLM response was not valid JSON"):
-        classify_bug_report(preprocessed_report, lambda prompt: "{not valid json")
+        parse_classification_response("{not valid json")
 
 
-def test_classify_bug_report_rejects_non_object_json_response():
-    preprocessed_report = make_preprocessed_report()
-
+def test_parse_classification_response_rejects_non_object_json_response():
     with pytest.raises(ValueError, match="LLM response JSON must be an object"):
-        classify_bug_report(preprocessed_report, lambda prompt: '["not", "an", "object"]')
+        parse_classification_response('["not", "an", "object"]')
 
 
-def test_classify_bug_report_rejects_unsupported_response_type():
-    preprocessed_report = make_preprocessed_report()
-
+def test_parse_classification_response_rejects_unsupported_response_type():
     with pytest.raises(TypeError, match="LLM response must be a JSON string or mapping"):
-        classify_bug_report(preprocessed_report, lambda prompt: 123)  # type: ignore[return-value]
+        parse_classification_response(123)  # type: ignore[arg-type]
 
 
-def test_classify_bug_report_rejects_invalid_classification_contract():
-    preprocessed_report = make_preprocessed_report()
+def test_parse_classification_response_rejects_invalid_classification_contract():
     response = valid_llm_response()
     response["confidence"] = 1.5
 
     with pytest.raises(ValidationError):
-        classify_bug_report(preprocessed_report, lambda prompt: response)
+        parse_classification_response(response)
 
 
-def test_classify_bug_report_rejects_extra_llm_fields():
-    preprocessed_report = make_preprocessed_report()
+def test_parse_classification_response_rejects_extra_llm_fields():
     response = valid_llm_response()
     response["unexpected_field"] = "should be rejected"
 
     with pytest.raises(ValidationError):
-        classify_bug_report(preprocessed_report, lambda prompt: response)
+        parse_classification_response(response)
 
 
-def test_classify_bug_report_logs_start_and_completion(caplog):
-    preprocessed_report = make_preprocessed_report()
-
+def test_parse_classification_response_logs_completion(caplog):
     with caplog.at_level(logging.INFO, logger="bug_triage_workflow.classifier"):
-        classify_bug_report(preprocessed_report, lambda prompt: valid_llm_response())
+        parse_classification_response(valid_llm_response())
 
-    assert "Bug report classification started" in caplog.text
     assert "Bug report classification completed" in caplog.text
     assert any(
-        record.executor == "classify_bug_report"
-        and record.extracted_field_names == ["browser", "environment", "module"]
-        and record.preprocessor_missing_info_count == 0
-        for record in caplog.records
-    )
-    assert any(
-        getattr(record, "executor", None) == "classify_bug_report"
+        getattr(record, "executor", None) == "classifier_agent"
         and getattr(record, "category", None) == BugCategory.AUTHENTICATION.value
         and getattr(record, "urgency", None) == Urgency.HIGH.value
         and getattr(record, "sentiment", None) == Sentiment.FRUSTRATED.value
@@ -154,17 +139,17 @@ def test_classify_bug_report_logs_start_and_completion(caplog):
     )
 
 
-def test_classify_bug_report_logs_validation_failure(caplog):
-    preprocessed_report = make_preprocessed_report()
+def test_parse_classification_response_logs_validation_failure(caplog):
     response = valid_llm_response()
     response["confidence"] = -0.1
 
     with caplog.at_level(logging.ERROR, logger="bug_triage_workflow.classifier"):
         with pytest.raises(ValidationError):
-            classify_bug_report(preprocessed_report, lambda prompt: response)
+            parse_classification_response(response)
 
     assert "Bug report classification failed validation" in caplog.text
     assert any(
-        getattr(record, "executor", None) == "classify_bug_report"
+        getattr(record, "executor", None) == "classifier_agent"
         for record in caplog.records
     )
+    assert all(record.exc_info is None for record in caplog.records)

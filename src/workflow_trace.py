@@ -29,6 +29,12 @@ class WorkflowTrace:
     """Mutable per-run audit trace shared by workflow executors."""
 
     events: list[WorkflowEvent] = field(default_factory=list)
+    _classifier_provider_boundary_active: bool = field(
+        default=False,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def append(
         self,
@@ -48,3 +54,12 @@ class WorkflowTrace:
 
     def snapshot(self) -> list[WorkflowEvent]:
         return list(self.events)
+
+    def enter_classifier_provider_boundary(self) -> None:
+        self._classifier_provider_boundary_active = True
+
+    def exit_classifier_provider_boundary(self) -> None:
+        self._classifier_provider_boundary_active = False
+
+    def is_classifier_provider_boundary_active(self) -> bool:
+        return self._classifier_provider_boundary_active

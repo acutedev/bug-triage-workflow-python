@@ -1,38 +1,13 @@
 """Tests for the OpenAI classifier provider adapter."""
 
-from types import SimpleNamespace
-
 import pytest
 
 from src.config import AppConfig
 from agent_framework import Agent
 
-from src.openai_provider import OpenAIClassifierClient, build_classifier_agent
-
-
-class FakeResponses:
-    def __init__(self, output_text: str | None = '{"category":"ui_bug"}') -> None:
-        self.output_text = output_text
-        self.calls: list[dict[str, object]] = []
-
-    def create(self, **kwargs):
-        self.calls.append(kwargs)
-        return SimpleNamespace(output_text=self.output_text)
-
-
-class FailingResponses:
-    def create(self, **kwargs):
-        raise RuntimeError("OpenAI unavailable")
-
-
-class FakeOpenAIClient:
-    def __init__(self, output_text: str | None = '{"category":"ui_bug"}') -> None:
-        self.responses = FakeResponses(output_text)
-
-
-class FailingOpenAIClient:
-    def __init__(self) -> None:
-        self.responses = FailingResponses()
+from src.models import TriageClassification
+import src.openai_provider as openai_provider
+from src.openai_provider import build_classifier_agent
 
 
 def make_config(
@@ -63,6 +38,7 @@ def test_build_classifier_agent_returns_native_maf_agent():
 
     assert isinstance(agent, Agent)
     assert agent.name == "classifier_agent"
+    assert agent.default_options["response_format"] is TriageClassification
 
 
 def test_build_classifier_agent_rejects_non_openai_provider():
@@ -88,56 +64,43 @@ def test_build_classifier_agent_allows_injected_client_without_api_key():
     assert agent.name == "classifier_agent"
 
 
-def test_openai_classifier_client_calls_responses_api_with_prompt_and_model():
-    fake_client = FakeOpenAIClient(output_text='{"category":"ui_bug"}')
-    adapter = OpenAIClassifierClient(make_config(), client=fake_client)
+def test_build_classifier_agent_configures_bounded_default_openai_client(
+    monkeypatch,
+):
+    captured: dict[str, object] = {}
 
-    result = adapter("Classify this bug")
+    class FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured["async_client_kwargs"] = kwargs
 
-    assert result == '{"category":"ui_bug"}'
-    assert fake_client.responses.calls == [
-        {
-            "model": "gpt-4.1-mini",
-            "input": "Classify this bug",
-            "temperature": 0,
-        }
-    ]
+    class FakeOpenAIChatClient:
+        def __init__(self, **kwargs):
+            captured["chat_client_kwargs"] = kwargs
+
+    monkeypatch.setattr(openai_provider, "AsyncOpenAI", FakeAsyncOpenAI)
+    monkeypatch.setattr(openai_provider, "OpenAIChatClient", FakeOpenAIChatClient)
+
+    agent = build_classifier_agent(make_config(api_key="secret-test-key"))
+
+    assert isinstance(agent, Agent)
+    assert agent.name == "classifier_agent"
+    assert captured["async_client_kwargs"] == {
+        "api_key": "secret-test-key",
+        "timeout": openai_provider.OPENAI_REQUEST_TIMEOUT_SECONDS,
+        "max_retries": openai_provider.OPENAI_MAX_RETRIES,
+    }
+    chat_client_kwargs = captured["chat_client_kwargs"]
+    assert isinstance(chat_client_kwargs, dict)
+    assert chat_client_kwargs["model"] == "gpt-4.1-mini"
+    assert isinstance(chat_client_kwargs["async_client"], FakeAsyncOpenAI)
 
 
-def test_openai_classifier_client_rejects_non_openai_provider():
-    with pytest.raises(ValueError, match="LLM_PROVIDER=openai"):
-        OpenAIClassifierClient(
-            make_config(provider="anthropic"),
-            client=FakeOpenAIClient(),
+def test_build_classifier_agent_logs_do_not_include_api_key(caplog):
+    with caplog.at_level("INFO", logger="bug_triage_workflow.openai_provider"):
+        build_classifier_agent(
+            make_config(api_key="super-secret-provider-key"),
+            client=FakeChatClient(),
         )
 
-
-def test_openai_classifier_client_rejects_missing_api_key():
-    with pytest.raises(ValueError, match="LLM_API_KEY is required"):
-        OpenAIClassifierClient(make_config(api_key=""), client=FakeOpenAIClient())
-
-
-@pytest.mark.parametrize("output_text", [None, "", "   "])
-def test_openai_classifier_client_rejects_missing_output_text(output_text):
-    adapter = OpenAIClassifierClient(
-        make_config(),
-        client=FakeOpenAIClient(output_text=output_text),
-    )
-
-    with pytest.raises(ValueError, match="non-empty output_text"):
-        adapter("Classify this bug")
-
-
-def test_openai_classifier_client_logs_api_failure(caplog):
-    adapter = OpenAIClassifierClient(make_config(), client=FailingOpenAIClient())
-
-    with caplog.at_level("ERROR", logger="bug_triage_workflow.openai_provider"):
-        with pytest.raises(RuntimeError, match="OpenAI unavailable"):
-            adapter("Classify this bug")
-
-    assert "OpenAI classification request failed" in caplog.text
-    assert any(
-        getattr(record, "executor", None) == "OpenAIClassifierClient"
-        and getattr(record, "model", None) == "gpt-4.1-mini"
-        for record in caplog.records
-    )
+    assert "Native classifier agent created" in caplog.text
+    assert "super-secret-provider-key" not in caplog.text

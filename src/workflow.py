@@ -69,16 +69,27 @@ def build_bug_triage_workflow(
 ) -> Workflow:
     """Build a fresh Microsoft Agent Framework bug triage workflow.
 
-    A fresh workflow is created for each run so executor state cannot leak
-    between workflow executions.
+    Built workflow objects are single-use for independent bug reports. Use the
+    public run/stream helpers, or build a fresh workflow for each new report, so
+    executor state cannot leak between executions. Human approval resume uses
+    the same built workflow and remains supported.
     """
     workflow_trace = trace if trace is not None else WorkflowTrace()
+    workflow_started = False
 
     @executor(id="preprocess_executor")
     async def preprocess_executor(
         raw_text: str,
         ctx: WorkflowContext[PreprocessedBugReport, WorkflowResult],
     ) -> None:
+        nonlocal workflow_started
+        if workflow_started:
+            raise RuntimeError(
+                "Bug triage workflows are single-use; build a fresh workflow "
+                "for each independent report."
+            )
+        workflow_started = True
+
         workflow_trace.append(
             WorkflowStatus.RECEIVED,
             "Bug report received.",
@@ -114,12 +125,17 @@ def build_bug_triage_workflow(
         ctx.set_state(PREPROCESSED_REPORT_STATE_KEY, preprocessed_report)
         prompt = build_classification_prompt(preprocessed_report)
 
-        await ctx.send_message(
-            AgentExecutorRequest(
-                messages=[Message("user", contents=[prompt])],
-                should_respond=True,
+        workflow_trace.enter_classifier_provider_boundary()
+        try:
+            await ctx.send_message(
+                AgentExecutorRequest(
+                    messages=[Message("user", contents=[prompt])],
+                    should_respond=True,
+                )
             )
-        )
+        except Exception:
+            workflow_trace.exit_classifier_provider_boundary()
+            raise
 
     @executor(id="classifier_response_executor")
     async def classifier_response_executor(
@@ -127,6 +143,7 @@ def build_bug_triage_workflow(
         ctx: WorkflowContext[ClassifiedBugReport, WorkflowResult],
     ) -> None:
         """Validate native agent output and restore the typed report from state."""
+        workflow_trace.exit_classifier_provider_boundary()
         preprocessed_report: PreprocessedBugReport = ctx.get_state(
             PREPROCESSED_REPORT_STATE_KEY
         )
@@ -412,12 +429,15 @@ async def run_bug_triage_workflow(
     try:
         run_result = await workflow.run(raw_text)
     except Exception as error:
-        return build_failed_result(
-            error,
-            stage="classification",
-            executor="classifier_agent",
-            trace=workflow_trace,
-        )
+        if workflow_trace.is_classifier_provider_boundary_active():
+            workflow_trace.exit_classifier_provider_boundary()
+            return build_failed_result(
+                error,
+                stage="classification",
+                executor="classifier_agent",
+                trace=workflow_trace,
+            )
+        raise
 
     outputs = run_result.get_outputs()
 
@@ -457,6 +477,10 @@ async def stream_bug_triage_workflow(
         ):
             yield event
     except Exception as error:
+        if not workflow_trace.is_classifier_provider_boundary_active():
+            raise
+
+        workflow_trace.exit_classifier_provider_boundary()
         yield WorkflowEvent(
             "output",
             executor_id="classifier_agent",
