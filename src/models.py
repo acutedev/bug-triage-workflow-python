@@ -252,4 +252,9 @@ class WorkflowResult(StrictBaseModel):
                 "when human approval is required"
             )
 
+        if self.event_log and self.event_log[-1].status != self.status:
+            raise ValueError(
+                "the final workflow event status must match the workflow result status"
+            )
+
         return self

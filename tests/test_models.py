@@ -319,14 +319,41 @@ def test_workflow_result_event_log_uses_workflow_events():
         final_action="Created standard bug ticket.",
         event_log=[
             WorkflowEvent(
-                status=WorkflowStatus.PREPROCESSED,
-                executor="preprocess_bug_report",
-                message="Bug report preprocessed.",
+                status=WorkflowStatus.COMPLETED,
+                executor="create_standard_ticket_executor",
+                message="Created standard bug ticket.",
             )
         ],
     )
     assert len(result.event_log) == 1
-    assert result.event_log[0].executor == "preprocess_bug_report"
+    assert result.event_log[0].executor == "create_standard_ticket_executor"
+
+
+def test_workflow_result_final_event_status_must_match_result_status():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            final_action="Created standard bug ticket.",
+            event_log=[
+                WorkflowEvent(
+                    status=WorkflowStatus.ROUTED,
+                    executor="router_executor",
+                    message="Bug report routed.",
+                )
+            ],
+        )
+
+
+def test_workflow_result_empty_event_log_is_still_valid():
+    result = WorkflowResult(
+        status=WorkflowStatus.COMPLETED,
+        selected_route=RouteName.CREATE_STANDARD_TICKET,
+        final_action="Created standard bug ticket.",
+        event_log=[],
+    )
+
+    assert result.event_log == []
 
 
 # HumanApprovalDecision tests
