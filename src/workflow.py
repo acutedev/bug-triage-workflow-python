@@ -44,7 +44,37 @@ from src.models import (
 from src.preprocess import preprocess_bug_report
 from src.router import route_triage
 
+
 PREPROCESSED_REPORT_STATE_KEY = "preprocessed_report"
+
+
+@dataclass
+class WorkflowTrace:
+    """Mutable per-run audit trace shared by workflow executors."""
+
+    events: list[WorkflowEvent]
+
+    def __init__(self) -> None:
+        self.events = []
+
+    def append(
+        self,
+        status: WorkflowStatus,
+        message: str,
+        executor: str,
+        **data: Any,
+    ) -> None:
+        self.events.append(
+            _workflow_event(
+                status,
+                message,
+                executor,
+                **data,
+            )
+        )
+
+    def snapshot(self) -> list[WorkflowEvent]:
+        return list(self.events)
 
 
 @dataclass(frozen=True)
@@ -83,8 +113,9 @@ class HumanApprovalOutcome:
 class HumanApprovalExecutor(Executor):
     """Pause the workflow for a typed human approval decision."""
 
-    def __init__(self) -> None:
+    def __init__(self, trace: WorkflowTrace) -> None:
         super().__init__(id="request_human_approval_executor")
+        self._trace = trace
 
     @handler
     async def request_approval(
@@ -92,6 +123,11 @@ class HumanApprovalExecutor(Executor):
         routed_report: RoutedBugReport,
         ctx: WorkflowContext[HumanApprovalOutcome, WorkflowResult],
     ) -> None:
+        self._trace.append(
+            WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+            "Waiting for human approval.",
+            "request_human_approval_executor",
+        )
         waiting_result = WorkflowResult(
             status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
             selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
@@ -100,14 +136,7 @@ class HumanApprovalExecutor(Executor):
             approval_granted=None,
             final_action=None,
             error=None,
-            event_log=[
-                *_base_event_log(routed_report),
-                _workflow_event(
-                    WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
-                    "Waiting for human approval.",
-                    "request_human_approval_executor",
-                ),
-            ],
+            event_log=self._trace.snapshot(),
         )
         await ctx.yield_output(waiting_result)
 
@@ -186,46 +215,21 @@ def _workflow_event(
     )
 
 
-def _base_event_log(routed_report: RoutedBugReport) -> list[WorkflowEvent]:
-    """Build the shared trace for a successfully routed bug report."""
-
-    return [
-        _workflow_event(
-            WorkflowStatus.RECEIVED,
-            "Bug report received.",
-            "preprocess_executor",
-        ),
-        _workflow_event(
-            WorkflowStatus.PREPROCESSED,
-            "Bug report preprocessed.",
-            "preprocess_executor",
-            missing_info=routed_report.preprocessed_report.missing_info,
-        ),
-        _workflow_event(
-            WorkflowStatus.CLASSIFIED,
-            "Bug report classified.",
-            "classifier_agent",
-            category=routed_report.classification.category.value,
-            urgency=routed_report.classification.urgency.value,
-            sentiment=routed_report.classification.sentiment.value,
-        ),
-        _workflow_event(
-            WorkflowStatus.ROUTED,
-            "Bug report routed.",
-            "router_executor",
-            selected_route=routed_report.route_decision.selected_route.value,
-        ),
-    ]
-
-
 def _completed_result(
     routed_report: RoutedBugReport,
+    trace: WorkflowTrace,
     *,
     final_action: str,
     executor: str,
     human_approval_required: bool = False,
 ) -> WorkflowResult:
     """Build a validated completed workflow result."""
+
+    trace.append(
+        WorkflowStatus.COMPLETED,
+        final_action,
+        executor,
+    )
 
     return WorkflowResult(
         status=WorkflowStatus.COMPLETED,
@@ -235,14 +239,7 @@ def _completed_result(
         approval_granted=None,
         final_action=final_action,
         error=None,
-        event_log=[
-            *_base_event_log(routed_report),
-            _workflow_event(
-                WorkflowStatus.COMPLETED,
-                final_action,
-                executor,
-            ),
-        ],
+        event_log=trace.snapshot(),
     )
 
 
@@ -251,36 +248,16 @@ def _failed_result(
     *,
     stage: str,
     executor: str,
-    preprocessed_report: PreprocessedBugReport | None = None,
+    trace: WorkflowTrace,
 ) -> WorkflowResult:
     """Build a validated terminal result for an expected workflow failure."""
 
     error_message = f"Bug {stage} failed: {error}"
-    event_log = [
-        _workflow_event(
-            WorkflowStatus.RECEIVED,
-            "Bug report received.",
-            "preprocess_executor",
-        )
-    ]
-
-    if preprocessed_report is not None:
-        event_log.append(
-            _workflow_event(
-                WorkflowStatus.PREPROCESSED,
-                "Bug report preprocessed.",
-                "preprocess_executor",
-                missing_info=preprocessed_report.missing_info,
-            )
-        )
-
-    event_log.append(
-        _workflow_event(
-            WorkflowStatus.FAILED,
-            error_message,
-            executor,
-            error_type=type(error).__name__,
-        )
+    trace.append(
+        WorkflowStatus.FAILED,
+        error_message,
+        executor,
+        error_type=type(error).__name__,
     )
 
     return WorkflowResult(
@@ -291,7 +268,7 @@ def _failed_result(
         approval_granted=None,
         final_action=None,
         error=error_message,
-        event_log=event_log,
+        event_log=trace.snapshot(),
     )
 
 
@@ -299,18 +276,25 @@ def build_bug_triage_workflow(
     classifier_agent: Agent,
     *,
     human_approval_enabled: bool = True,
+    trace: WorkflowTrace | None = None,
 ) -> Workflow:
     """Build a fresh Microsoft Agent Framework bug triage workflow.
 
     A fresh workflow is created for each run so executor state cannot leak
     between workflow executions.
     """
+    workflow_trace = trace or WorkflowTrace()
 
     @executor(id="preprocess_executor")
     async def preprocess_executor(
         raw_text: str,
         ctx: WorkflowContext[PreprocessedBugReport, WorkflowResult],
     ) -> None:
+        workflow_trace.append(
+            WorkflowStatus.RECEIVED,
+            "Bug report received.",
+            "preprocess_executor",
+        )
         try:
             preprocessed_report = preprocess_bug_report(raw_text)
         except ValueError as error:
@@ -319,10 +303,17 @@ def build_bug_triage_workflow(
                     error,
                     stage="preprocessing",
                     executor="preprocess_executor",
+                    trace=workflow_trace,
                 )
             )
             return
 
+        workflow_trace.append(
+            WorkflowStatus.PREPROCESSED,
+            "Bug report preprocessed.",
+            "preprocess_executor",
+            missing_info=preprocessed_report.missing_info,
+        )
         await ctx.send_message(preprocessed_report)
 
     @executor(id="classifier_request_executor")
@@ -361,10 +352,19 @@ def build_bug_triage_workflow(
                     error,
                     stage="classification",
                     executor="classifier_response_executor",
-                    preprocessed_report=preprocessed_report,
+                    trace=workflow_trace,
                 )
             )
             return
+
+        workflow_trace.append(
+            WorkflowStatus.CLASSIFIED,
+            "Bug report classified.",
+            "classifier_agent",
+            category=classification.category.value,
+            urgency=classification.urgency.value,
+            sentiment=classification.sentiment.value,
+        )
 
         await ctx.send_message(
             ClassifiedBugReport(
@@ -382,7 +382,12 @@ def build_bug_triage_workflow(
             classified_report.classification,
             classified_report.preprocessed_report,
         )
-
+        workflow_trace.append(
+            WorkflowStatus.ROUTED,
+            "Bug report routed.",
+            "router_executor",
+            selected_route=route_decision.selected_route.value,
+        )
         await ctx.send_message(
             RoutedBugReport(
                 preprocessed_report=classified_report.preprocessed_report,
@@ -398,6 +403,7 @@ def build_bug_triage_workflow(
     ) -> None:
         result = _completed_result(
             routed_report,
+            workflow_trace,
             final_action="Request additional information from the bug reporter.",
             executor="request_more_info_executor",
         )
@@ -410,12 +416,13 @@ def build_bug_triage_workflow(
     ) -> None:
         result = _completed_result(
             routed_report,
+            workflow_trace,
             final_action="Create a standard bug ticket.",
             executor="create_standard_ticket_executor",
         )
         await ctx.yield_output(result)
 
-    human_approval_executor = HumanApprovalExecutor()
+    human_approval_executor = HumanApprovalExecutor(workflow_trace)
 
     @executor(id="create_direct_escalation_ticket_executor")
     async def create_direct_escalation_ticket_executor(
@@ -426,6 +433,14 @@ def build_bug_triage_workflow(
             "Create an escalation ticket directly because human approval "
             "is disabled by configuration."
         )
+        workflow_trace.append(
+            WorkflowStatus.COMPLETED,
+            final_action,
+            "create_direct_escalation_ticket_executor",
+            human_approval_enabled=False,
+            policy_route=routed_report.route_decision.selected_route.value,
+            effective_route=RouteName.CREATE_ESCALATION_TICKET.value,
+        )
         result = WorkflowResult(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_ESCALATION_TICKET,
@@ -434,21 +449,7 @@ def build_bug_triage_workflow(
             approval_granted=None,
             final_action=final_action,
             error=None,
-            event_log=[
-                *_base_event_log(routed_report),
-                _workflow_event(
-                    WorkflowStatus.COMPLETED,
-                    final_action,
-                    "create_direct_escalation_ticket_executor",
-                    human_approval_enabled=False,
-                    policy_route=(
-                        routed_report.route_decision.selected_route.value
-                    ),
-                    effective_route=(
-                        RouteName.CREATE_ESCALATION_TICKET.value
-                    ),
-                ),
-            ],
+            event_log=workflow_trace.snapshot(),
         )
         await ctx.yield_output(result)
 
@@ -457,6 +458,17 @@ def build_bug_triage_workflow(
         outcome: HumanApprovalOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
+        workflow_trace.append(
+            WorkflowStatus.APPROVED,
+            "Human reviewer approved escalation.",
+            "request_human_approval_executor",
+            approver=outcome.decision.approver,
+        )
+        workflow_trace.append(
+            WorkflowStatus.COMPLETED,
+            "Escalation ticket created.",
+            "create_escalation_ticket_executor",
+        )
         result = WorkflowResult(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_ESCALATION_TICKET,
@@ -467,25 +479,7 @@ def build_bug_triage_workflow(
                 "Create an escalation ticket for human-reviewed handling."
             ),
             error=None,
-            event_log=[
-                *_base_event_log(outcome.routed_report),
-                _workflow_event(
-                    WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
-                    "Waiting for human approval.",
-                    "request_human_approval_executor",
-                ),
-                _workflow_event(
-                    WorkflowStatus.APPROVED,
-                    "Human reviewer approved escalation.",
-                    "request_human_approval_executor",
-                    approver=outcome.decision.approver,
-                ),
-                _workflow_event(
-                    WorkflowStatus.COMPLETED,
-                    "Escalation ticket created.",
-                    "create_escalation_ticket_executor",
-                ),
-            ],
+            event_log=workflow_trace.snapshot(),
         )
         await ctx.yield_output(result)
 
@@ -494,6 +488,12 @@ def build_bug_triage_workflow(
         outcome: HumanApprovalOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
+        workflow_trace.append(
+            WorkflowStatus.REJECTED,
+            "Human reviewer rejected escalation.",
+            "log_rejection_executor",
+            approver=outcome.decision.approver,
+        )
         result = WorkflowResult(
             status=WorkflowStatus.REJECTED,
             selected_route=RouteName.LOG_REJECTION,
@@ -502,20 +502,7 @@ def build_bug_triage_workflow(
             approval_granted=False,
             final_action=None,
             error=None,
-            event_log=[
-                *_base_event_log(outcome.routed_report),
-                _workflow_event(
-                    WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
-                    "Waiting for human approval.",
-                    "request_human_approval_executor",
-                ),
-                _workflow_event(
-                    WorkflowStatus.REJECTED,
-                    "Human reviewer rejected escalation.",
-                    "log_rejection_executor",
-                    approver=outcome.decision.approver,
-                ),
-            ],
+            event_log=workflow_trace.snapshot(),
         )
         await ctx.yield_output(result)
 
@@ -524,6 +511,16 @@ def build_bug_triage_workflow(
         routed_report: RoutedBugReport,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
+        error_message = (
+            "No Microsoft Agent Framework branch was configured for route "
+            f"{routed_report.route_decision.selected_route.value}."
+        )
+        workflow_trace.append(
+            WorkflowStatus.FAILED,
+            "No workflow branch was configured for the selected route.",
+            "unexpected_route_executor",
+            selected_route=routed_report.route_decision.selected_route.value,
+        )
         result = WorkflowResult(
             status=WorkflowStatus.FAILED,
             selected_route=routed_report.route_decision.selected_route,
@@ -531,21 +528,8 @@ def build_bug_triage_workflow(
             human_approval_required=False,
             approval_granted=None,
             final_action=None,
-            error=(
-                "No Microsoft Agent Framework branch was configured for route "
-                f"{routed_report.route_decision.selected_route.value}."
-            ),
-            event_log=[
-                *_base_event_log(routed_report),
-                _workflow_event(
-                    WorkflowStatus.FAILED,
-                    "No workflow branch was configured for the selected route.",
-                    "unexpected_route_executor",
-                    selected_route=(
-                        routed_report.route_decision.selected_route.value
-                    ),
-                ),
-            ],
+            error=error_message,
+            event_log=workflow_trace.snapshot(),
         )
         await ctx.yield_output(result)
 
@@ -630,24 +614,20 @@ async def run_bug_triage_workflow(
 ) -> WorkflowResult:
     """Run the workflow and return its single validated output."""
 
+    workflow_trace = WorkflowTrace()
     workflow = build_bug_triage_workflow(
         classifier_agent,
         human_approval_enabled=human_approval_enabled,
+        trace=workflow_trace,
     )
     try:
         run_result = await workflow.run(raw_text)
     except Exception as error:
-        preprocessed_report: PreprocessedBugReport | None = None
-        try:
-            preprocessed_report = preprocess_bug_report(raw_text)
-        except ValueError:
-            pass
-
         return _failed_result(
             error,
             stage="classification",
             executor="classifier_agent",
-            preprocessed_report=preprocessed_report,
+            trace=workflow_trace,
         )
 
     outputs = run_result.get_outputs()
@@ -671,10 +651,11 @@ def stream_bug_triage_workflow(
     human_approval_enabled: bool = True,
 ):
     """Return a Microsoft Agent Framework event stream for the workflow."""
-
+    workflow_trace = WorkflowTrace()
     workflow = build_bug_triage_workflow(
         classifier_agent,
         human_approval_enabled=human_approval_enabled,
+        trace=workflow_trace,
     )
     return workflow.run(
         raw_text,
