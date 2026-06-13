@@ -22,6 +22,7 @@ from agent_framework import (
     Workflow,
     WorkflowBuilder,
     WorkflowContext,
+    WorkflowEvent,
     executor,
 )
 from typing_extensions import Never
@@ -432,21 +433,37 @@ async def run_bug_triage_workflow(
     return result
 
 
-def stream_bug_triage_workflow(
+
+async def stream_bug_triage_workflow(
     raw_text: str,
     classifier_agent: Agent,
     *,
     human_approval_enabled: bool = True,
 ):
-    """Return a Microsoft Agent Framework event stream for the workflow."""
+    """Stream workflow events and convert native-agent failures to typed output."""
+
     workflow_trace = WorkflowTrace()
     workflow = build_bug_triage_workflow(
         classifier_agent,
         human_approval_enabled=human_approval_enabled,
         trace=workflow_trace,
     )
-    return workflow.run(
-        raw_text,
-        stream=True,
-        include_status_events=True,
-    )
+
+    try:
+        async for event in workflow.run(
+            raw_text,
+            stream=True,
+            include_status_events=True,
+        ):
+            yield event
+    except Exception as error:
+        yield WorkflowEvent(
+            "output",
+            executor_id="classifier_agent",
+            data=build_failed_result(
+                error,
+                stage="classification",
+                executor="classifier_agent",
+                trace=workflow_trace,
+            ),
+        )

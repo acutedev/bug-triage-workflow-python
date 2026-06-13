@@ -609,6 +609,43 @@ def test_workflow_returns_failed_result_for_unexpected_llm_client_error():
     assert result.event_log[-1].data["error_type"] == "RuntimeError"
 
 
+def test_workflow_stream_emits_failed_result_for_unexpected_llm_client_error():
+    async def collect_events():
+        stream = stream_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            make_classifier_agent(
+                error=RuntimeError("LLM provider unavailable.")
+            )[0],
+        )
+
+        return [event async for event in stream]
+
+    events = asyncio.run(collect_events())
+
+    final_result = next(
+        event.data
+        for event in events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    )
+
+    assert final_result.status == WorkflowStatus.FAILED
+    assert final_result.error == (
+        "Bug classification failed: LLM provider unavailable."
+    )
+    assert final_result.final_action is None
+    assert [event.status for event in final_result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.FAILED,
+    ]
+    assert final_result.event_log[-1].executor == "classifier_agent"
+    assert final_result.event_log[-1].data["error_type"] == "RuntimeError"
+
+
 def test_workflow_stream_emits_final_workflow_result():
     async def collect_events():
         stream = stream_bug_triage_workflow(
