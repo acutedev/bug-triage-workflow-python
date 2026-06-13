@@ -225,8 +225,14 @@ class WorkflowResult(StrictBaseModel):
         if self.status == WorkflowStatus.FAILED and not self.error:
             raise ValueError("error is required when status is failed")
 
+        if self.status == WorkflowStatus.FAILED and self.final_action is not None:
+            raise ValueError("final_action must be None when status is failed")
+
         if self.status == WorkflowStatus.COMPLETED and not self.final_action:
             raise ValueError("final_action is required when status is completed")
+
+        if self.status == WorkflowStatus.COMPLETED and self.error is not None:
+            raise ValueError("error must be None when status is completed")
 
         if self.approval_granted is not None and not self.human_approval_required:
             raise ValueError("human_approval_required must be true when approval_granted is provided")

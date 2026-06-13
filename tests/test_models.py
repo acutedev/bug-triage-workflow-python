@@ -253,6 +253,15 @@ def test_failed_workflow_result_with_blank_error_rejected():
         WorkflowResult(status=WorkflowStatus.FAILED, error="   ")
 
 
+def test_failed_workflow_result_with_final_action_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.FAILED,
+            error="validation failure",
+            final_action="Create a ticket anyway.",
+        )
+
+
 def test_completed_workflow_result_requires_final_action():
     with pytest.raises(ValidationError):
         WorkflowResult(status=WorkflowStatus.COMPLETED)
@@ -266,6 +275,16 @@ def test_completed_workflow_result_with_final_action_is_valid():
     )
     assert result.status == WorkflowStatus.COMPLETED
     assert result.final_action == "Created standard bug ticket."
+
+
+def test_completed_workflow_result_with_error_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            final_action="Created standard bug ticket.",
+            error="unexpected error",
+        )
 
 
 def test_workflow_result_updated_at_cannot_be_before_created_at():
