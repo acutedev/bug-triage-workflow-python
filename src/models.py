@@ -96,6 +96,16 @@ class PreprocessedBugReport(StrictBaseModel):
             raise ValueError("missing_info items must not be blank")
         return v
 
+    @model_validator(mode="after")
+    def missing_info_flag_must_match_contents(self) -> "PreprocessedBugReport":
+        expected_flag = bool(self.missing_info)
+        if self.has_obvious_missing_info is not expected_flag:
+            raise ValueError(
+                "has_obvious_missing_info must be true when missing_info is non-empty "
+                "and false when missing_info is empty"
+            )
+        return self
+
 
 class TriageClassification(StrictBaseModel):
     category: BugCategory

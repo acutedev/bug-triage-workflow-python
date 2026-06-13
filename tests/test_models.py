@@ -76,6 +76,26 @@ def test_blank_preprocessed_missing_info_item_rejected():
         )
 
 
+def test_preprocessed_missing_info_requires_flag_true():
+    with pytest.raises(ValidationError):
+        PreprocessedBugReport(
+            raw_text="The login page crashes.",
+            normalized_text="The login page crashes.",
+            missing_info=["browser"],
+            has_obvious_missing_info=False,
+        )
+
+
+def test_preprocessed_empty_missing_info_requires_flag_false():
+    with pytest.raises(ValidationError):
+        PreprocessedBugReport(
+            raw_text="The login page crashes.",
+            normalized_text="The login page crashes.",
+            missing_info=[],
+            has_obvious_missing_info=True,
+        )
+
+
 # TriageClassification tests
 
 
