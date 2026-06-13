@@ -352,11 +352,9 @@ def test_human_approval_decision_can_represent_rejection():
     assert rejected.notes == "Not approved"
 
 
-def test_human_approval_not_required_without_decision_is_valid():
-    decision = HumanApprovalDecision(required=False)
-    assert decision.required is False
-    assert decision.approval_granted is None
-    assert decision.approver is None
+def test_human_approval_not_required_without_decision_rejected():
+    with pytest.raises(ValidationError):
+        HumanApprovalDecision(required=False)
 
 
 def test_human_approval_not_required_with_decision_rejected():

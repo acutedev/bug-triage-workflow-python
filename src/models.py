@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -153,7 +153,7 @@ class RouteDecision(StrictBaseModel):
 
 
 class HumanApprovalDecision(StrictBaseModel):
-    required: bool = False
+    required: Literal[True] = True
     approval_granted: bool | None = None
     approver: str | None = None
     notes: str | None = None
@@ -167,13 +167,6 @@ class HumanApprovalDecision(StrictBaseModel):
 
     @model_validator(mode="after")
     def approval_fields_must_be_consistent(self) -> "HumanApprovalDecision":
-        if not self.required:
-            if self.approval_granted is not None:
-                raise ValueError("approval_granted must be None when approval is not required")
-            if self.approver is not None:
-                raise ValueError("approver must be None when approval is not required")
-            return self
-
         if self.approval_granted is None:
             raise ValueError("approval_granted is required when approval is required")
 
