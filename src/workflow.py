@@ -2,7 +2,7 @@
 
 The workflow layer connects the already-tested business components:
 
-raw report -> preprocess -> classify -> route -> terminal action
+raw report -> preprocess -> native classifier agent -> route -> terminal action
 
 Business logic remains in preprocess.py, classifier.py, and router.py. This
 module is responsible only for Microsoft Agent Framework orchestration.
@@ -10,14 +10,17 @@ module is responsible only for Microsoft Agent Framework orchestration.
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import Any
 
 from agent_framework import (
+    Agent,
+    AgentExecutorRequest,
+    AgentExecutorResponse,
     Case,
     Default,
     Executor,
+    Message,
     Workflow,
     WorkflowBuilder,
     WorkflowContext,
@@ -27,7 +30,7 @@ from agent_framework import (
 )
 from typing_extensions import Never
 
-from src.classifier import LLMClassifierClient, classify_bug_report
+from src.classifier import build_classification_prompt, parse_classification_response
 from src.models import (
     HumanApprovalDecision,
     PreprocessedBugReport,
@@ -41,10 +44,12 @@ from src.models import (
 from src.preprocess import preprocess_bug_report
 from src.router import route_triage
 
+PREPROCESSED_REPORT_STATE_KEY = "preprocessed_report"
+
 
 @dataclass(frozen=True)
 class ClassifiedBugReport:
-    """Message passed from the classifier executor to the router."""
+    """Message passed from the native classifier agent adapter to the router."""
 
     preprocessed_report: PreprocessedBugReport
     classification: TriageClassification
@@ -199,7 +204,7 @@ def _base_event_log(routed_report: RoutedBugReport) -> list[WorkflowEvent]:
         _workflow_event(
             WorkflowStatus.CLASSIFIED,
             "Bug report classified.",
-            "classifier_executor",
+            "classifier_agent",
             category=routed_report.classification.category.value,
             urgency=routed_report.classification.urgency.value,
             sentiment=routed_report.classification.sentiment.value,
@@ -291,7 +296,7 @@ def _failed_result(
 
 
 def build_bug_triage_workflow(
-    llm_client: LLMClassifierClient,
+    classifier_agent: Agent,
     *,
     human_approval_enabled: bool = True,
 ) -> Workflow:
@@ -320,23 +325,42 @@ def build_bug_triage_workflow(
 
         await ctx.send_message(preprocessed_report)
 
-    @executor(id="classifier_executor")
-    async def classifier_executor(
+    @executor(id="classifier_request_executor")
+    async def classifier_request_executor(
         preprocessed_report: PreprocessedBugReport,
+        ctx: WorkflowContext[AgentExecutorRequest],
+    ) -> None:
+        """Store typed report state and submit a request to the native MAF agent."""
+        ctx.set_state(PREPROCESSED_REPORT_STATE_KEY, preprocessed_report)
+        prompt = build_classification_prompt(preprocessed_report)
+
+        await ctx.send_message(
+            AgentExecutorRequest(
+                messages=[Message("user", contents=[prompt])],
+                should_respond=True,
+            )
+        )
+
+    @executor(id="classifier_response_executor")
+    async def classifier_response_executor(
+        response: AgentExecutorResponse,
         ctx: WorkflowContext[ClassifiedBugReport, WorkflowResult],
     ) -> None:
+        """Validate native agent output and restore the typed report from state."""
+        preprocessed_report: PreprocessedBugReport = ctx.get_state(
+            PREPROCESSED_REPORT_STATE_KEY
+        )
+
         try:
-            classification = await asyncio.to_thread(
-                classify_bug_report,
-                preprocessed_report,
-                llm_client,
+            classification = parse_classification_response(
+                response.agent_response.text
             )
         except Exception as error:
             await ctx.yield_output(
                 _failed_result(
                     error,
                     stage="classification",
-                    executor="classifier_executor",
+                    executor="classifier_response_executor",
                     preprocessed_report=preprocessed_report,
                 )
             )
@@ -533,7 +557,7 @@ def build_bug_triage_workflow(
 
     output_executors = [
         preprocess_executor,
-        classifier_executor,
+        classifier_response_executor,
         request_more_info_executor,
         create_standard_ticket_executor,
         unexpected_route_executor,
@@ -559,8 +583,10 @@ def build_bug_triage_workflow(
             ),
             output_from=output_executors,
         )
-        .add_edge(preprocess_executor, classifier_executor)
-        .add_edge(classifier_executor, router_executor)
+        .add_edge(preprocess_executor, classifier_request_executor)
+        .add_edge(classifier_request_executor, classifier_agent)
+        .add_edge(classifier_agent, classifier_response_executor)
+        .add_edge(classifier_response_executor, router_executor)
         .add_switch_case_edge_group(
             router_executor,
             [
@@ -598,17 +624,32 @@ def build_bug_triage_workflow(
 
 async def run_bug_triage_workflow(
     raw_text: str,
-    llm_client: LLMClassifierClient,
+    classifier_agent: Agent,
     *,
     human_approval_enabled: bool = True,
 ) -> WorkflowResult:
     """Run the workflow and return its single validated output."""
 
     workflow = build_bug_triage_workflow(
-        llm_client,
+        classifier_agent,
         human_approval_enabled=human_approval_enabled,
     )
-    run_result = await workflow.run(raw_text)
+    try:
+        run_result = await workflow.run(raw_text)
+    except Exception as error:
+        preprocessed_report: PreprocessedBugReport | None = None
+        try:
+            preprocessed_report = preprocess_bug_report(raw_text)
+        except ValueError:
+            pass
+
+        return _failed_result(
+            error,
+            stage="classification",
+            executor="classifier_agent",
+            preprocessed_report=preprocessed_report,
+        )
+
     outputs = run_result.get_outputs()
 
     if len(outputs) != 1:
@@ -625,14 +666,14 @@ async def run_bug_triage_workflow(
 
 def stream_bug_triage_workflow(
     raw_text: str,
-    llm_client: LLMClassifierClient,
+    classifier_agent: Agent,
     *,
     human_approval_enabled: bool = True,
 ):
     """Return a Microsoft Agent Framework event stream for the workflow."""
 
     workflow = build_bug_triage_workflow(
-        llm_client,
+        classifier_agent,
         human_approval_enabled=human_approval_enabled,
     )
     return workflow.run(

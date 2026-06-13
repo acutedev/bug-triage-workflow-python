@@ -5,7 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from src.config import AppConfig
-from src.openai_provider import OpenAIClassifierClient
+from agent_framework import Agent
+
+from src.openai_provider import OpenAIClassifierClient, build_classifier_agent
 
 
 class FakeResponses:
@@ -45,6 +47,45 @@ def make_config(
         llm_model=model,
         human_approval_enabled=True,
     )
+
+
+# === Native MAF Agent build_classifier_agent tests ===
+
+class FakeChatClient:
+    """Minimal injected chat client used to construct a native MAF Agent."""
+
+
+def test_build_classifier_agent_returns_native_maf_agent():
+    agent = build_classifier_agent(
+        make_config(),
+        client=FakeChatClient(),
+    )
+
+    assert isinstance(agent, Agent)
+    assert agent.name == "classifier_agent"
+
+
+def test_build_classifier_agent_rejects_non_openai_provider():
+    with pytest.raises(ValueError, match="LLM_PROVIDER=openai"):
+        build_classifier_agent(
+            make_config(provider="anthropic"),
+            client=FakeChatClient(),
+        )
+
+
+def test_build_classifier_agent_requires_api_key_without_injected_client():
+    with pytest.raises(ValueError, match="LLM_API_KEY is required"):
+        build_classifier_agent(make_config(api_key=""))
+
+
+def test_build_classifier_agent_allows_injected_client_without_api_key():
+    agent = build_classifier_agent(
+        make_config(api_key=""),
+        client=FakeChatClient(),
+    )
+
+    assert isinstance(agent, Agent)
+    assert agent.name == "classifier_agent"
 
 
 def test_openai_classifier_client_calls_responses_api_with_prompt_and_model():

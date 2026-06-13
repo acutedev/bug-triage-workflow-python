@@ -1,18 +1,57 @@
-"""OpenAI provider adapter for classifier prompts.
+"""OpenAI provider construction for bug triage classification.
 
-This adapter is intentionally thin: it sends the classifier prompt to OpenAI and
-returns the model's text output. The classifier module remains responsible for
-JSON parsing and Pydantic validation.
+The primary integration creates a native Microsoft Agent Framework ``Agent``
+backed by ``OpenAIChatClient``. The legacy callable adapter remains available
+temporarily for focused unit tests while the workflow is migrated.
 """
 
 from __future__ import annotations
 
 from typing import Any
 
+from agent_framework import Agent
+from agent_framework.openai import OpenAIChatClient
+
+from src.classifier import CLASSIFIER_AGENT_INSTRUCTIONS
+from src.models import TriageClassification
+
 from src.config import AppConfig
 from src.logging_config import get_logger
 
 logger = get_logger("openai_provider")
+
+
+def build_classifier_agent(
+    config: AppConfig,
+    *,
+    client: Any | None = None,
+) -> Agent:
+    """Create the native MAF agent used as the workflow classifier node."""
+    if config.llm_provider != "openai":
+        raise ValueError("Classifier agent requires LLM_PROVIDER=openai")
+
+    if not config.llm_api_key and client is None:
+        raise ValueError("LLM_API_KEY is required for the classifier agent")
+
+    chat_client = client or OpenAIChatClient(
+        model=config.llm_model,
+        api_key=config.llm_api_key,
+    )
+
+    logger.info(
+        "Native classifier agent created",
+        extra={
+            "executor": "classifier_agent",
+            "model": config.llm_model,
+        },
+    )
+
+    return Agent(
+        client=chat_client,
+        name="classifier_agent",
+        instructions=CLASSIFIER_AGENT_INSTRUCTIONS,
+        default_options={"response_format": TriageClassification},
+    )
 
 
 class OpenAIClassifierClient:

@@ -1,12 +1,9 @@
-"""LLM-backed classifier executor for bug report triage.
+"""Prompt and validation helpers for bug report triage classification.
 
-The classifier is the workflow's agent-style executor. It builds a constrained
-classification prompt, calls an injected LLM client, parses the model response,
-and validates the result against the TriageClassification contract.
-
-The LLM client is injected instead of imported directly from a provider SDK so
-this module stays testable and provider-independent. The OpenAI-specific adapter
-can be added later in the workflow/application layer.
+The native Microsoft Agent Framework classifier node uses this module to build
+its prompt and validate the agent response against the strict
+TriageClassification contract. The callable classifier entry point remains for
+focused unit tests and backward-compatible provider-independent use.
 """
 
 from __future__ import annotations
@@ -45,6 +42,8 @@ _CLASSIFICATION_SCHEMA_DESCRIPTION = {
     "reasoning": "brief explanation for the classification",
     "confidence": "number between 0.0 and 1.0",
 }
+
+CLASSIFIER_AGENT_INSTRUCTIONS = _CLASSIFICATION_SYSTEM_INSTRUCTIONS
 
 
 def build_classification_prompt(preprocessed_report: PreprocessedBugReport) -> str:
@@ -89,6 +88,38 @@ def _coerce_llm_response_to_mapping(response: str | Mapping[str, Any]) -> Mappin
     raise TypeError("LLM response must be a JSON string or mapping")
 
 
+def parse_classification_response(
+    response: str | Mapping[str, Any],
+    *,
+    executor: str = "classifier_agent",
+) -> TriageClassification:
+    """Parse and validate a classifier agent response."""
+    response_mapping = _coerce_llm_response_to_mapping(response)
+
+    try:
+        classification = TriageClassification.model_validate(response_mapping)
+    except ValidationError:
+        logger.exception(
+            "Bug report classification failed validation",
+            extra={"executor": executor},
+        )
+        raise
+
+    logger.info(
+        "Bug report classification completed",
+        extra={
+            "executor": executor,
+            "category": classification.category.value,
+            "urgency": classification.urgency.value,
+            "sentiment": classification.sentiment.value,
+            "recommended_route": classification.recommended_route.value,
+            "confidence": classification.confidence,
+        },
+    )
+
+    return classification
+
+
 def classify_bug_report(
     preprocessed_report: PreprocessedBugReport,
     llm_client: LLMClassifierClient,
@@ -120,27 +151,7 @@ def classify_bug_report(
     )
 
     response = llm_client(prompt)
-    response_mapping = _coerce_llm_response_to_mapping(response)
-
-    try:
-        classification = TriageClassification.model_validate(response_mapping)
-    except ValidationError:
-        logger.exception(
-            "Bug report classification failed validation",
-            extra={"executor": "classify_bug_report"},
-        )
-        raise
-
-    logger.info(
-        "Bug report classification completed",
-        extra={
-            "executor": "classify_bug_report",
-            "category": classification.category.value,
-            "urgency": classification.urgency.value,
-            "sentiment": classification.sentiment.value,
-            "recommended_route": classification.recommended_route.value,
-            "confidence": classification.confidence,
-        },
+    return parse_classification_response(
+        response,
+        executor="classify_bug_report",
     )
-
-    return classification

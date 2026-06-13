@@ -1,6 +1,18 @@
 """Integration tests for Microsoft Agent Framework bug triage orchestration."""
 
 import asyncio
+import json
+from collections.abc import AsyncIterable, Awaitable, Sequence
+from typing import Any
+
+from agent_framework import (
+    Agent,
+    ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    Message,
+    ResponseStream,
+)
 
 import src.workflow as workflow_module
 from src.models import (
@@ -8,6 +20,7 @@ from src.models import (
     HumanApprovalDecision,
     RouteName,
     Sentiment,
+    TriageClassification,
     Urgency,
     WorkflowResult,
     WorkflowStatus,
@@ -38,6 +51,81 @@ def make_llm_response(
     }
 
 
+class FakeClassifierChatClient:
+    """Deterministic chat client used by a real native MAF Agent in tests."""
+
+    def __init__(
+        self,
+        response: dict[str, object] | None = None,
+        *,
+        error: Exception | None = None,
+    ) -> None:
+        self.response = make_llm_response() if response is None else response
+        self.error = error
+        self.call_count = 0
+        self.received_messages: list[object] = []
+
+    def get_response(
+        self,
+        messages: str | Message | list[str] | list[Message],
+        *,
+        stream: bool = False,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
+        del kwargs
+        self.call_count += 1
+        self.received_messages.append(messages)
+        response_text = json.dumps(self.response)
+
+        if stream:
+            async def _stream() -> AsyncIterable[ChatResponseUpdate]:
+                if self.error is not None:
+                    raise self.error
+                yield ChatResponseUpdate(
+                    contents=[Content.from_text(response_text)],
+                    role="assistant",
+                    finish_reason="stop",
+                )
+
+            def _finalize(
+                updates: Sequence[ChatResponseUpdate],
+            ) -> ChatResponse:
+                return ChatResponse.from_updates(
+                    updates,
+                    output_format_type=(options or {}).get("response_format"),
+                )
+
+            return ResponseStream(_stream(), finalizer=_finalize)
+
+        async def _get() -> ChatResponse:
+            if self.error is not None:
+                raise self.error
+            return ChatResponse(
+                messages=Message(
+                    role="assistant",
+                    contents=[response_text],
+                )
+            )
+
+        return _get()
+
+
+def make_classifier_agent(
+    response: dict[str, object] | None = None,
+    *,
+    error: Exception | None = None,
+) -> tuple[Agent, FakeClassifierChatClient]:
+    client = FakeClassifierChatClient(response, error=error)
+    agent = Agent(
+        client=client,
+        name="classifier_agent",
+        instructions="Return only the requested bug classification JSON.",
+        default_options={"response_format": TriageClassification},
+    )
+    return agent, client
+
+
 def security_bug_report() -> str:
     return (
         "In production on Chrome using Windows, when I open the account page, "
@@ -58,9 +146,8 @@ def print_workflow_result(label: str, result: WorkflowResult) -> None:
 
 
 def test_build_bug_triage_workflow_contains_expected_executors():
-    workflow = build_bug_triage_workflow(
-        lambda prompt: make_llm_response()
-    )
+    classifier_agent, _ = make_classifier_agent()
+    workflow = build_bug_triage_workflow(classifier_agent)
 
     executor_ids = {
         workflow_executor.id
@@ -68,7 +155,9 @@ def test_build_bug_triage_workflow_contains_expected_executors():
     }
     assert executor_ids == {
         "preprocess_executor",
-        "classifier_executor",
+        "classifier_request_executor",
+        "classifier_agent",
+        "classifier_response_executor",
         "router_executor",
         "request_more_info_executor",
         "create_standard_ticket_executor",
@@ -80,8 +169,9 @@ def test_build_bug_triage_workflow_contains_expected_executors():
 
 
 def test_workflow_uses_direct_escalation_graph_when_approval_is_disabled():
+    classifier_agent, _ = make_classifier_agent()
     workflow = build_bug_triage_workflow(
-        lambda prompt: make_llm_response(),
+        classifier_agent,
         human_approval_enabled=False,
     )
 
@@ -96,14 +186,8 @@ def test_workflow_uses_direct_escalation_graph_when_approval_is_disabled():
     assert "log_rejection_executor" not in executor_ids
 
 
-def test_workflow_runs_classifier_in_worker_thread(monkeypatch):
-    to_thread_calls: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
-
-    async def fake_to_thread(func, *args, **kwargs):
-        to_thread_calls.append((func, args, kwargs))
-        return func(*args, **kwargs)
-
-    monkeypatch.setattr(workflow_module.asyncio, "to_thread", fake_to_thread)
+def test_workflow_runs_native_classifier_agent():
+    classifier_agent, client = make_classifier_agent()
 
     result = asyncio.run(
         run_bug_triage_workflow(
@@ -112,19 +196,23 @@ def test_workflow_runs_classifier_in_worker_thread(monkeypatch):
                 "the page shows an error instead of saving. "
                 "It should save successfully."
             ),
-            lambda prompt: make_llm_response(),
+            classifier_agent,
         )
     )
 
-    print_workflow_result("worker-thread workflow", result)
+    print_workflow_result("native-agent workflow", result)
 
     assert result.status == WorkflowStatus.COMPLETED
-    assert len(to_thread_calls) == 1
-    called_function, called_args, called_kwargs = to_thread_calls[0]
-    assert getattr(called_function, "__name__", None) == "classify_bug_report"
-    assert called_args[0].normalized_text.startswith("In production on Chrome")
-    assert callable(called_args[1])
-    assert called_kwargs == {}
+    assert client.call_count == 1
+    assert client.received_messages
+    received_messages = client.received_messages[0]
+    assert isinstance(received_messages, list)
+    assert any(
+        isinstance(message, Message)
+        and "In production on Chrome" in message.text
+        for message in received_messages
+    )
+    assert result.event_log[2].executor == "classifier_agent"
 
 
 def test_workflow_creates_standard_ticket_for_complete_safe_report():
@@ -137,12 +225,14 @@ def test_workflow_creates_standard_ticket_for_complete_safe_report():
     result = asyncio.run(
         run_bug_triage_workflow(
             bug_report,
-            lambda prompt: make_llm_response(
-                category=BugCategory.UI_BUG,
-                urgency=Urgency.MEDIUM,
-                sentiment=Sentiment.NEUTRAL,
-                recommended_route=RouteName.CREATE_STANDARD_TICKET,
-            ),
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.UI_BUG,
+                    urgency=Urgency.MEDIUM,
+                    sentiment=Sentiment.NEUTRAL,
+                    recommended_route=RouteName.CREATE_STANDARD_TICKET,
+                )
+            )[0],
         )
     )
 
@@ -165,13 +255,15 @@ def test_workflow_requests_more_information_when_report_is_incomplete():
     result = asyncio.run(
         run_bug_triage_workflow(
             "The login page is broken.",
-            lambda prompt: make_llm_response(
-                category=BugCategory.AUTHENTICATION,
-                urgency=Urgency.MEDIUM,
-                sentiment=Sentiment.CONFUSED,
-                missing_info=["browser", "device_or_os"],
-                recommended_route=RouteName.REQUEST_MORE_INFO,
-            ),
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.AUTHENTICATION,
+                    urgency=Urgency.MEDIUM,
+                    sentiment=Sentiment.CONFUSED,
+                    missing_info=["browser", "device_or_os"],
+                    recommended_route=RouteName.REQUEST_MORE_INFO,
+                )
+            )[0],
         )
     )
 
@@ -194,12 +286,14 @@ def test_workflow_requests_more_information_when_report_is_incomplete():
 def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
     async def run_scenario():
         workflow = build_bug_triage_workflow(
-            lambda prompt: make_llm_response(
-                category=BugCategory.SECURITY,
-                urgency=Urgency.CRITICAL,
-                sentiment=Sentiment.NEUTRAL,
-                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            )
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.SECURITY,
+                    urgency=Urgency.CRITICAL,
+                    sentiment=Sentiment.NEUTRAL,
+                    recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+                )
+            )[0]
         )
 
         initial_stream = workflow.run(
@@ -271,12 +365,14 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
 def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
     async def run_scenario():
         workflow = build_bug_triage_workflow(
-            lambda prompt: make_llm_response(
-                category=BugCategory.SECURITY,
-                urgency=Urgency.CRITICAL,
-                sentiment=Sentiment.NEUTRAL,
-                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            )
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.SECURITY,
+                    urgency=Urgency.CRITICAL,
+                    sentiment=Sentiment.NEUTRAL,
+                    recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+                )
+            )[0]
         )
 
         initial_stream = workflow.run(
@@ -345,12 +441,14 @@ def test_risky_report_escalates_directly_when_human_approval_is_disabled():
     result = asyncio.run(
         run_bug_triage_workflow(
             security_bug_report(),
-            lambda prompt: make_llm_response(
-                category=BugCategory.SECURITY,
-                urgency=Urgency.CRITICAL,
-                sentiment=Sentiment.NEUTRAL,
-                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            ),
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.SECURITY,
+                    urgency=Urgency.CRITICAL,
+                    sentiment=Sentiment.NEUTRAL,
+                    recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+                )
+            )[0],
             human_approval_enabled=False,
         )
     )
@@ -391,12 +489,14 @@ def test_disabled_human_approval_stream_does_not_request_information():
     async def collect_events():
         stream = stream_bug_triage_workflow(
             security_bug_report(),
-            lambda prompt: make_llm_response(
-                category=BugCategory.SECURITY,
-                urgency=Urgency.CRITICAL,
-                sentiment=Sentiment.NEUTRAL,
-                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            ),
+            make_classifier_agent(
+                make_llm_response(
+                    category=BugCategory.SECURITY,
+                    urgency=Urgency.CRITICAL,
+                    sentiment=Sentiment.NEUTRAL,
+                    recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+                )
+            )[0],
             human_approval_enabled=False,
         )
 
@@ -434,7 +534,7 @@ def test_workflow_returns_failed_result_for_preprocessing_validation_error(
     result = asyncio.run(
         run_bug_triage_workflow(
             "Invalid bug report.",
-            lambda prompt: make_llm_response(),
+            make_classifier_agent()[0],
         )
     )
 
@@ -461,7 +561,7 @@ def test_workflow_returns_failed_result_for_invalid_classifier_output():
                 "the page shows an error instead of saving. "
                 "It should save successfully."
             ),
-            lambda prompt: {"invalid": "classifier response"},
+            make_classifier_agent({"invalid": "classifier response"})[0],
         )
     )
 
@@ -475,14 +575,11 @@ def test_workflow_returns_failed_result_for_invalid_classifier_output():
         WorkflowStatus.PREPROCESSED,
         WorkflowStatus.FAILED,
     ]
-    assert result.event_log[-1].executor == "classifier_executor"
+    assert result.event_log[-1].executor == "classifier_response_executor"
     assert result.event_log[-1].data["error_type"] == "ValidationError"
 
 
 def test_workflow_returns_failed_result_for_unexpected_llm_client_error():
-    def raise_client_error(prompt: str):
-        raise RuntimeError("LLM provider unavailable.")
-
     result = asyncio.run(
         run_bug_triage_workflow(
             (
@@ -490,7 +587,9 @@ def test_workflow_returns_failed_result_for_unexpected_llm_client_error():
                 "the page shows an error instead of saving. "
                 "It should save successfully."
             ),
-            raise_client_error,
+            make_classifier_agent(
+                error=RuntimeError("LLM provider unavailable.")
+            )[0],
         )
     )
 
@@ -506,7 +605,7 @@ def test_workflow_returns_failed_result_for_unexpected_llm_client_error():
         WorkflowStatus.PREPROCESSED,
         WorkflowStatus.FAILED,
     ]
-    assert result.event_log[-1].executor == "classifier_executor"
+    assert result.event_log[-1].executor == "classifier_agent"
     assert result.event_log[-1].data["error_type"] == "RuntimeError"
 
 
@@ -518,7 +617,7 @@ def test_workflow_stream_emits_final_workflow_result():
                 "the page shows an error instead of saving. "
                 "It should save successfully."
             ),
-            lambda prompt: make_llm_response(),
+            make_classifier_agent()[0],
         )
 
         return [event async for event in stream]
