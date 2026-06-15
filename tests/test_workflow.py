@@ -18,7 +18,8 @@ from agent_framework import (
 import src.workflow as workflow_module
 from src.models import (
     BugCategory,
-    HumanApprovalDecision,
+    HumanReviewAction,
+    HumanReviewDecision,
     RouteName,
     Sentiment,
     TriageClassification,
@@ -158,6 +159,55 @@ def workflow_statuses(result: WorkflowResult) -> list[WorkflowStatus]:
     return [event.status for event in result.event_log]
 
 
+def event_executor_ids(events: list[object]) -> set[str]:
+    return {
+        executor_id
+        for event in events
+        if (executor_id := getattr(event, "executor_id", None)) is not None
+    }
+
+
+async def run_human_review_scenario(
+    action: HumanReviewAction,
+) -> tuple[list[object], list[object]]:
+    workflow = build_bug_triage_workflow(
+        make_classifier_agent(
+            make_llm_response(
+                category=BugCategory.SECURITY,
+                urgency=Urgency.CRITICAL,
+                sentiment=Sentiment.NEUTRAL,
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            )
+        )[0]
+    )
+
+    initial_stream = workflow.run(
+        security_bug_report(),
+        stream=True,
+        include_status_events=True,
+    )
+    initial_events = [event async for event in initial_stream]
+
+    request_event = next(
+        event for event in initial_events if event.type == "request_info"
+    )
+
+    resumed_stream = workflow.run(
+        stream=True,
+        responses={
+            request_event.request_id: HumanReviewDecision(
+                required=True,
+                action=action,
+                approver="integration-test",
+                notes=f"{action.value} selected.",
+            )
+        },
+        include_status_events=True,
+    )
+    resumed_events = [event async for event in resumed_stream]
+    return initial_events, resumed_events
+
+
 def test_build_bug_triage_workflow_contains_expected_executors():
     classifier_agent, _ = make_classifier_agent()
     workflow = build_bug_triage_workflow(classifier_agent)
@@ -174,10 +224,11 @@ def test_build_bug_triage_workflow_contains_expected_executors():
         "router_executor",
         "request_more_info_executor",
         "create_standard_ticket_executor",
-        "request_human_approval_executor",
+        "request_human_review_executor",
         "unexpected_route_executor",
         "create_escalation_ticket_executor",
         "log_rejection_executor",
+        "unexpected_human_review_action_executor",
     }
 
 
@@ -194,7 +245,7 @@ def test_workflow_uses_direct_escalation_graph_when_approval_is_disabled():
     }
 
     assert "create_direct_escalation_ticket_executor" in executor_ids
-    assert "request_human_approval_executor" not in executor_ids
+    assert "request_human_review_executor" not in executor_ids
     assert "create_escalation_ticket_executor" not in executor_ids
     assert "log_rejection_executor" not in executor_ids
 
@@ -254,7 +305,9 @@ def test_workflow_creates_standard_ticket_for_complete_safe_report():
     assert result.status == WorkflowStatus.COMPLETED
     assert result.selected_route == RouteName.CREATE_STANDARD_TICKET
     assert result.final_action == "Create a standard bug ticket."
-    assert result.human_approval_required is False
+    assert result.human_review_required is False
+    assert result.human_review_action is None
+    assert result.approval_granted is None
     assert [event.status for event in result.event_log] == [
         WorkflowStatus.RECEIVED,
         WorkflowStatus.PREPROCESSED,
@@ -296,46 +349,10 @@ def test_workflow_requests_more_information_when_report_is_incomplete():
     ]
 
 
-def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
-    async def run_scenario():
-        workflow = build_bug_triage_workflow(
-            make_classifier_agent(
-                make_llm_response(
-                    category=BugCategory.SECURITY,
-                    urgency=Urgency.CRITICAL,
-                    sentiment=Sentiment.NEUTRAL,
-                    recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
-                )
-            )[0]
-        )
-
-        initial_stream = workflow.run(
-            security_bug_report(),
-            stream=True,
-            include_status_events=True,
-        )
-        initial_events = [event async for event in initial_stream]
-
-        request_event = next(
-            event for event in initial_events if event.type == "request_info"
-        )
-
-        resumed_stream = workflow.run(
-            stream=True,
-            responses={
-                request_event.request_id: HumanApprovalDecision(
-                    required=True,
-                    approval_granted=True,
-                    approver="integration-test",
-                    notes="Approved for escalation.",
-                )
-            },
-            include_status_events=True,
-        )
-        resumed_events = [event async for event in resumed_stream]
-        return initial_events, resumed_events
-
-    initial_events, resumed_events = asyncio.run(run_scenario())
+def test_human_review_approved_creates_escalation_ticket():
+    initial_events, resumed_events = asyncio.run(
+        run_human_review_scenario(HumanReviewAction.APPROVE_ESCALATION)
+    )
 
     waiting_result = next(
         event.data
@@ -348,29 +365,35 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
         if isinstance(getattr(event, "data", None), WorkflowResult)
     )
 
-    print_workflow_result("waiting for human approval", waiting_result)
-    print_workflow_result("approved human review", final_result)
+    print_workflow_result("awaiting human review", waiting_result)
+    print_workflow_result("escalation approved human review", final_result)
 
-    assert waiting_result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
+    assert waiting_result.status == WorkflowStatus.AWAITING_HUMAN_REVIEW
     assert waiting_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
-    assert waiting_result.human_approval_required is True
+    assert waiting_result.human_review_required is True
+    assert waiting_result.human_review_action is None
     assert waiting_result.approval_granted is None
     assert waiting_result.final_action is None
 
     assert final_result.status == WorkflowStatus.COMPLETED
     assert final_result.selected_route == RouteName.CREATE_ESCALATION_TICKET
-    assert final_result.human_approval_required is True
+    assert final_result.human_review_required is True
+    assert final_result.human_review_action == HumanReviewAction.APPROVE_ESCALATION
     assert final_result.approval_granted is True
     assert final_result.final_action == (
         "Create an escalation ticket for human-reviewed handling."
     )
+    resumed_executor_ids = event_executor_ids(resumed_events)
+    assert "create_escalation_ticket_executor" in resumed_executor_ids
+    assert "create_standard_ticket_executor" not in resumed_executor_ids
+    assert "log_rejection_executor" not in resumed_executor_ids
     assert [event.status for event in final_result.event_log] == [
         WorkflowStatus.RECEIVED,
         WorkflowStatus.PREPROCESSED,
         WorkflowStatus.CLASSIFIED,
         WorkflowStatus.ROUTED,
-        WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
-        WorkflowStatus.APPROVED,
+        WorkflowStatus.AWAITING_HUMAN_REVIEW,
+        WorkflowStatus.ESCALATION_APPROVED,
         WorkflowStatus.COMPLETED,
     ]
     for status in [
@@ -378,51 +401,15 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_approval():
         WorkflowStatus.PREPROCESSED,
         WorkflowStatus.CLASSIFIED,
         WorkflowStatus.ROUTED,
-        WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+        WorkflowStatus.AWAITING_HUMAN_REVIEW,
     ]:
         assert workflow_statuses(final_result).count(status) == 1
 
 
-def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
-    async def run_scenario():
-        workflow = build_bug_triage_workflow(
-            make_classifier_agent(
-                make_llm_response(
-                    category=BugCategory.SECURITY,
-                    urgency=Urgency.CRITICAL,
-                    sentiment=Sentiment.NEUTRAL,
-                    recommended_route=RouteName.REQUEST_HUMAN_APPROVAL,
-                )
-            )[0]
-        )
-
-        initial_stream = workflow.run(
-            security_bug_report(),
-            stream=True,
-            include_status_events=True,
-        )
-        initial_events = [event async for event in initial_stream]
-
-        request_event = next(
-            event for event in initial_events if event.type == "request_info"
-        )
-
-        resumed_stream = workflow.run(
-            stream=True,
-            responses={
-                request_event.request_id: HumanApprovalDecision(
-                    required=True,
-                    approval_granted=False,
-                    approver="integration-test",
-                    notes="Rejected after review.",
-                )
-            },
-            include_status_events=True,
-        )
-        resumed_events = [event async for event in resumed_stream]
-        return initial_events, resumed_events
-
-    initial_events, resumed_events = asyncio.run(run_scenario())
+def test_human_review_standard_option_creates_standard_ticket():
+    initial_events, resumed_events = asyncio.run(
+        run_human_review_scenario(HumanReviewAction.CREATE_STANDARD_TICKET)
+    )
 
     waiting_result = next(
         event.data
@@ -435,30 +422,91 @@ def test_workflow_pauses_for_human_approval_and_resumes_with_rejection():
         if isinstance(getattr(event, "data", None), WorkflowResult)
     )
 
-    print_workflow_result("waiting for human approval", waiting_result)
-    print_workflow_result("rejected human review", final_result)
+    print_workflow_result("awaiting human review", waiting_result)
+    print_workflow_result("standard-ticket human review", final_result)
 
-    assert waiting_result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
+    assert waiting_result.status == WorkflowStatus.AWAITING_HUMAN_REVIEW
     assert waiting_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
-    assert waiting_result.human_approval_required is True
+    assert waiting_result.human_review_required is True
+    assert waiting_result.human_review_action is None
     assert waiting_result.approval_granted is None
     assert waiting_result.final_action is None
-    assert final_result.status == WorkflowStatus.REJECTED
-    assert final_result.selected_route == RouteName.LOG_REJECTION
-    assert final_result.human_approval_required is True
-    assert final_result.approval_granted is False
-    assert final_result.final_action is None
+
+    assert final_result.status == WorkflowStatus.COMPLETED
+    assert final_result.selected_route == RouteName.CREATE_STANDARD_TICKET
+    assert final_result.human_review_required is True
+    assert final_result.human_review_action == HumanReviewAction.CREATE_STANDARD_TICKET
+    assert final_result.approval_granted is None
+    assert final_result.final_action == "Create a standard bug ticket."
+    assert final_result.classification == waiting_result.classification
+    resumed_executor_ids = event_executor_ids(resumed_events)
+    assert "create_standard_ticket_executor" in resumed_executor_ids
+    assert "create_escalation_ticket_executor" not in resumed_executor_ids
+    assert "log_rejection_executor" not in resumed_executor_ids
     assert [event.status for event in final_result.event_log] == [
         WorkflowStatus.RECEIVED,
         WorkflowStatus.PREPROCESSED,
         WorkflowStatus.CLASSIFIED,
         WorkflowStatus.ROUTED,
-        WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
-        WorkflowStatus.REJECTED,
+        WorkflowStatus.AWAITING_HUMAN_REVIEW,
+        WorkflowStatus.STANDARD_TICKET_SELECTED,
+        WorkflowStatus.COMPLETED,
     ]
+    assert final_result.event_log[-2].executor == "request_human_review_executor"
+    assert final_result.event_log[-2].message == (
+        "Human reviewer selected standard-ticket handling instead of escalation."
+    )
+    assert final_result.event_log[-1].executor == "create_standard_ticket_executor"
 
 
-def test_risky_report_escalates_directly_when_human_approval_is_disabled():
+def test_human_review_rejected_logs_rejection():
+    initial_events, resumed_events = asyncio.run(
+        run_human_review_scenario(HumanReviewAction.REJECT_REPORT)
+    )
+
+    waiting_result = next(
+        event.data
+        for event in initial_events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    )
+    final_result = next(
+        event.data
+        for event in resumed_events
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    )
+
+    print_workflow_result("awaiting human review", waiting_result)
+    print_workflow_result("report rejected human review", final_result)
+
+    assert waiting_result.status == WorkflowStatus.AWAITING_HUMAN_REVIEW
+    assert waiting_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+    assert waiting_result.human_review_required is True
+    assert waiting_result.human_review_action is None
+    assert waiting_result.approval_granted is None
+    assert waiting_result.final_action is None
+
+    assert final_result.status == WorkflowStatus.REPORT_REJECTED
+    assert final_result.selected_route == RouteName.LOG_REJECTION
+    assert final_result.human_review_required is True
+    assert final_result.human_review_action == HumanReviewAction.REJECT_REPORT
+    assert final_result.approval_granted is False
+    assert final_result.final_action is None
+    resumed_executor_ids = event_executor_ids(resumed_events)
+    assert "log_rejection_executor" in resumed_executor_ids
+    assert "create_standard_ticket_executor" not in resumed_executor_ids
+    assert "create_escalation_ticket_executor" not in resumed_executor_ids
+    assert [event.status for event in final_result.event_log] == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.AWAITING_HUMAN_REVIEW,
+        WorkflowStatus.REPORT_REJECTED,
+    ]
+    assert final_result.event_log[-1].message == "Human reviewer rejected the report."
+
+
+def test_risky_report_escalates_directly_when_human_review_is_disabled():
     result = asyncio.run(
         run_bug_triage_workflow(
             security_bug_report(),
@@ -478,10 +526,11 @@ def test_risky_report_escalates_directly_when_human_approval_is_disabled():
 
     assert result.status == WorkflowStatus.COMPLETED
     assert result.selected_route == RouteName.CREATE_ESCALATION_TICKET
-    assert result.human_approval_required is False
+    assert result.human_review_required is False
+    assert result.human_review_action is None
     assert result.approval_granted is None
     assert result.final_action == (
-        "Create an escalation ticket directly because human approval "
+        "Create an escalation ticket directly because human review "
         "is disabled by configuration."
     )
     assert [event.status for event in result.event_log] == [
@@ -495,7 +544,7 @@ def test_risky_report_escalates_directly_when_human_approval_is_disabled():
         result.event_log[-1].executor
         == "create_direct_escalation_ticket_executor"
     )
-    assert result.event_log[-1].data["human_approval_enabled"] is False
+    assert result.event_log[-1].data["human_review_enabled"] is False
     assert (
         result.event_log[-1].data["policy_route"]
         == RouteName.REQUEST_HUMAN_APPROVAL.value
@@ -506,7 +555,7 @@ def test_risky_report_escalates_directly_when_human_approval_is_disabled():
     )
 
 
-def test_disabled_human_approval_stream_does_not_request_information():
+def test_disabled_human_review_stream_does_not_request_information():
     async def collect_events():
         stream = stream_bug_triage_workflow(
             security_bug_report(),
@@ -536,7 +585,8 @@ def test_disabled_human_approval_stream_does_not_request_information():
 
     assert final_result.status == WorkflowStatus.COMPLETED
     assert final_result.selected_route == RouteName.CREATE_ESCALATION_TICKET
-    assert final_result.human_approval_required is False
+    assert final_result.human_review_required is False
+    assert final_result.human_review_action is None
     assert final_result.approval_granted is None
 
 

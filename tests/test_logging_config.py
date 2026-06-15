@@ -142,7 +142,7 @@ def test_json_log_formatter_includes_extra_fields():
         level=logging.WARNING,
         pathname=__file__,
         lineno=1,
-        msg="Human approval required",
+        msg="Human review required",
         args=(),
         exc_info=None,
     )

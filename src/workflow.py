@@ -28,9 +28,11 @@ from agent_framework import (
 from typing_extensions import Never
 
 from src.classifier import build_classification_prompt, parse_classification_response
-from src.human_approval import HumanApprovalExecutor, approval_matches
+from src.human_approval import HumanReviewExecutor, review_action_matches
 from src.models import (
+    HumanReviewAction,
     PreprocessedBugReport,
+    RouteDecision,
     RouteName,
     WorkflowResult,
     WorkflowStatus,
@@ -217,18 +219,51 @@ def build_bug_triage_workflow(
 
     @executor(id="create_standard_ticket_executor")
     async def create_standard_ticket_executor(
-        routed_report: RoutedBugReport,
+        routed_or_reviewed_report: RoutedBugReport | HumanApprovalOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
+        human_review_action = None
+        human_review_required = False
+
+        if isinstance(routed_or_reviewed_report, HumanApprovalOutcome):
+            outcome = routed_or_reviewed_report
+            human_review_action = HumanReviewAction.CREATE_STANDARD_TICKET
+            human_review_required = True
+            workflow_trace.append(
+                WorkflowStatus.STANDARD_TICKET_SELECTED,
+                (
+                    "Human reviewer selected standard-ticket handling "
+                    "instead of escalation."
+                ),
+                "request_human_review_executor",
+                approver=outcome.decision.approver,
+                human_review_action=outcome.decision.action.value,
+            )
+            routed_report = RoutedBugReport(
+                preprocessed_report=outcome.routed_report.preprocessed_report,
+                classification=outcome.routed_report.classification,
+                route_decision=RouteDecision(
+                    selected_route=RouteName.CREATE_STANDARD_TICKET,
+                    reason=(
+                        "Human reviewer selected standard-ticket handling "
+                        "instead of escalation."
+                    ),
+                ),
+            )
+        else:
+            routed_report = routed_or_reviewed_report
+
         result = build_completed_result(
             routed_report,
             workflow_trace,
             final_action="Create a standard bug ticket.",
             executor="create_standard_ticket_executor",
+            human_review_required=human_review_required,
+            human_review_action=human_review_action,
         )
         await ctx.yield_output(result)
 
-    human_approval_executor = HumanApprovalExecutor(workflow_trace)
+    human_review_executor = HumanReviewExecutor(workflow_trace)
 
     @executor(id="create_direct_escalation_ticket_executor")
     async def create_direct_escalation_ticket_executor(
@@ -236,14 +271,14 @@ def build_bug_triage_workflow(
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         final_action = (
-            "Create an escalation ticket directly because human approval "
+            "Create an escalation ticket directly because human review "
             "is disabled by configuration."
         )
         workflow_trace.append(
             WorkflowStatus.COMPLETED,
             final_action,
             "create_direct_escalation_ticket_executor",
-            human_approval_enabled=False,
+            human_review_enabled=False,
             policy_route=routed_report.route_decision.selected_route.value,
             effective_route=RouteName.CREATE_ESCALATION_TICKET.value,
         )
@@ -251,7 +286,8 @@ def build_bug_triage_workflow(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_ESCALATION_TICKET,
             classification=routed_report.classification,
-            human_approval_required=False,
+            human_review_required=False,
+            human_review_action=None,
             approval_granted=None,
             final_action=final_action,
             error=None,
@@ -265,9 +301,9 @@ def build_bug_triage_workflow(
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         workflow_trace.append(
-            WorkflowStatus.APPROVED,
+            WorkflowStatus.ESCALATION_APPROVED,
             "Human reviewer approved escalation.",
-            "request_human_approval_executor",
+            "request_human_review_executor",
             approver=outcome.decision.approver,
         )
         workflow_trace.append(
@@ -279,7 +315,8 @@ def build_bug_triage_workflow(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_ESCALATION_TICKET,
             classification=outcome.routed_report.classification,
-            human_approval_required=True,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.APPROVE_ESCALATION,
             approval_granted=True,
             final_action=(
                 "Create an escalation ticket for human-reviewed handling."
@@ -295,19 +332,49 @@ def build_bug_triage_workflow(
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         workflow_trace.append(
-            WorkflowStatus.REJECTED,
-            "Human reviewer rejected escalation.",
+            WorkflowStatus.REPORT_REJECTED,
+            "Human reviewer rejected the report.",
             "log_rejection_executor",
             approver=outcome.decision.approver,
+            human_review_action=outcome.decision.action.value,
         )
         result = WorkflowResult(
-            status=WorkflowStatus.REJECTED,
+            status=WorkflowStatus.REPORT_REJECTED,
             selected_route=RouteName.LOG_REJECTION,
             classification=outcome.routed_report.classification,
-            human_approval_required=True,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.REJECT_REPORT,
             approval_granted=False,
             final_action=None,
             error=None,
+            event_log=workflow_trace.snapshot(),
+        )
+        await ctx.yield_output(result)
+
+    @executor(id="unexpected_human_review_action_executor")
+    async def unexpected_human_review_action_executor(
+        outcome: HumanApprovalOutcome,
+        ctx: WorkflowContext[Never, WorkflowResult],
+    ) -> None:
+        error_message = (
+            "No Microsoft Agent Framework branch was configured for human "
+            f"review action {outcome.decision.action.value}."
+        )
+        workflow_trace.append(
+            WorkflowStatus.FAILED,
+            "No workflow branch was configured for the selected human review action.",
+            "unexpected_human_review_action_executor",
+            human_review_action=outcome.decision.action.value,
+        )
+        result = WorkflowResult(
+            status=WorkflowStatus.FAILED,
+            selected_route=outcome.routed_report.route_decision.selected_route,
+            classification=outcome.routed_report.classification,
+            human_review_required=True,
+            human_review_action=None,
+            approval_granted=None,
+            final_action=None,
+            error=error_message,
             event_log=workflow_trace.snapshot(),
         )
         await ctx.yield_output(result)
@@ -331,7 +398,8 @@ def build_bug_triage_workflow(
             status=WorkflowStatus.FAILED,
             selected_route=routed_report.route_decision.selected_route,
             classification=routed_report.classification,
-            human_approval_required=False,
+            human_review_required=False,
+            human_review_action=None,
             approval_granted=None,
             final_action=None,
             error=error_message,
@@ -339,8 +407,8 @@ def build_bug_triage_workflow(
         )
         await ctx.yield_output(result)
 
-    human_approval_target = (
-        human_approval_executor
+    human_review_target = (
+        human_review_executor
         if human_approval_enabled
         else create_direct_escalation_ticket_executor
     )
@@ -356,9 +424,10 @@ def build_bug_triage_workflow(
     if human_approval_enabled:
         output_executors.extend(
             [
-                human_approval_executor,
+                human_review_executor,
                 create_escalation_ticket_executor,
                 log_rejection_executor,
+                unexpected_human_review_action_executor,
             ]
         )
     else:
@@ -390,7 +459,7 @@ def build_bug_triage_workflow(
                 ),
                 Case(
                     condition=_route_matches(RouteName.REQUEST_HUMAN_APPROVAL),
-                    target=human_approval_target,
+                    target=human_review_target,
                 ),
                 Default(target=unexpected_route_executor),
             ],
@@ -399,13 +468,25 @@ def build_bug_triage_workflow(
 
     if human_approval_enabled:
         workflow_builder = workflow_builder.add_switch_case_edge_group(
-            human_approval_executor,
+            human_review_executor,
             [
                 Case(
-                    condition=approval_matches(True),
+                    condition=review_action_matches(
+                        HumanReviewAction.APPROVE_ESCALATION
+                    ),
                     target=create_escalation_ticket_executor,
                 ),
-                Default(target=log_rejection_executor),
+                Case(
+                    condition=review_action_matches(
+                        HumanReviewAction.CREATE_STANDARD_TICKET
+                    ),
+                    target=create_standard_ticket_executor,
+                ),
+                Case(
+                    condition=review_action_matches(HumanReviewAction.REJECT_REPORT),
+                    target=log_rejection_executor,
+                ),
+                Default(target=unexpected_human_review_action_executor),
             ],
         )
 

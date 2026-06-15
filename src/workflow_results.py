@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.models import WorkflowResult, WorkflowStatus
+from src.models import HumanReviewAction, WorkflowResult, WorkflowStatus
 from src.workflow_messages import RoutedBugReport
 from src.workflow_trace import WorkflowTrace
 
@@ -13,7 +13,8 @@ def build_completed_result(
     *,
     final_action: str,
     executor: str,
-    human_approval_required: bool = False,
+    human_review_required: bool = False,
+    human_review_action: HumanReviewAction | None = None,
 ) -> WorkflowResult:
     """Build a validated completed workflow result."""
 
@@ -27,7 +28,8 @@ def build_completed_result(
         status=WorkflowStatus.COMPLETED,
         selected_route=routed_report.route_decision.selected_route,
         classification=routed_report.classification,
-        human_approval_required=human_approval_required,
+        human_review_required=human_review_required,
+        human_review_action=human_review_action,
         approval_granted=None,
         final_action=final_action,
         error=None,
@@ -56,7 +58,8 @@ def build_failed_result(
         status=WorkflowStatus.FAILED,
         selected_route=None,
         classification=None,
-        human_approval_required=False,
+        human_review_required=False,
+        human_review_action=None,
         approval_granted=None,
         final_action=None,
         error=error_message,

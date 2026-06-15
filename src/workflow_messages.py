@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from src.models import (
-    HumanApprovalDecision,
+    HumanReviewDecision,
     PreprocessedBugReport,
     RouteDecision,
     TriageClassification,
@@ -39,7 +39,7 @@ class HumanApprovalRequest:
 
 @dataclass(frozen=True)
 class HumanApprovalOutcome:
-    """Human decision passed to the approved or rejected branch."""
+    """Human review decision passed to the selected terminal branch."""
 
     routed_report: RoutedBugReport
-    decision: HumanApprovalDecision
+    decision: HumanReviewDecision

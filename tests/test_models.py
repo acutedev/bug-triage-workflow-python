@@ -8,7 +8,8 @@ from pydantic import ValidationError
 from src.models import (
     BugCategory,
     BugReportInput,
-    HumanApprovalDecision,
+    HumanReviewAction,
+    HumanReviewDecision,
     PreprocessedBugReport,
     RouteDecision,
     RouteName,
@@ -232,7 +233,7 @@ def test_workflow_result_without_selected_route_when_failed():
         status=WorkflowStatus.FAILED,
         selected_route=None,
         classification=None,
-        human_approval_required=False,
+        human_review_required=False,
         approval_granted=None,
         final_action=None,
         error="validation failure",
@@ -267,7 +268,7 @@ def test_failed_workflow_result_with_approval_granted_rejected():
         WorkflowResult(
             status=WorkflowStatus.FAILED,
             error="validation failure",
-            human_approval_required=True,
+            human_review_required=True,
             approval_granted=False,
         )
 
@@ -385,107 +386,109 @@ def test_workflow_result_empty_event_log_is_still_valid():
     assert result.event_log == []
 
 
-# HumanApprovalDecision tests
+# HumanReviewDecision tests
 
 
-def test_human_approval_decision_can_represent_approval_granted():
-    approved = HumanApprovalDecision(required=True, approval_granted=True, approver="alice")
-    assert approved.required is True
-    assert approved.approval_granted is True
-    assert approved.approver == "alice"
-
-
-def test_human_approval_decision_can_represent_rejection():
-    rejected = HumanApprovalDecision(
+@pytest.mark.parametrize(
+    "action",
+    [
+        HumanReviewAction.APPROVE_ESCALATION,
+        HumanReviewAction.CREATE_STANDARD_TICKET,
+        HumanReviewAction.REJECT_REPORT,
+    ],
+)
+def test_human_review_decision_accepts_all_actions(action):
+    decision = HumanReviewDecision(
         required=True,
-        approval_granted=False,
-        approver="bob",
-        notes="Not approved",
+        action=action,
+        approver="alice",
+        notes="Reviewed by support.",
     )
-    assert rejected.required is True
-    assert rejected.approval_granted is False
-    assert rejected.approver == "bob"
-    assert rejected.notes == "Not approved"
+    assert decision.required is True
+    assert decision.action == action
+    assert decision.approver == "alice"
+    assert decision.notes == "Reviewed by support."
 
 
-def test_human_approval_not_required_without_decision_rejected():
+def test_human_review_decision_rejects_invalid_action():
     with pytest.raises(ValidationError):
-        HumanApprovalDecision(required=False)
-
-
-def test_human_approval_not_required_with_decision_rejected():
-    with pytest.raises(ValidationError):
-        HumanApprovalDecision(required=False, approval_granted=True)
-
-
-def test_human_approval_required_without_decision_rejected():
-    with pytest.raises(ValidationError):
-        HumanApprovalDecision(required=True)
-
-
-def test_human_approval_granted_without_approver_rejected():
-    with pytest.raises(ValidationError):
-        HumanApprovalDecision(required=True, approval_granted=True)
-
-
-def test_human_approval_rejected_without_approver_rejected():
-    with pytest.raises(ValidationError):
-        HumanApprovalDecision(required=True, approval_granted=False)
-
-
-def test_blank_human_approval_text_fields_rejected():
-    with pytest.raises(ValidationError):
-        HumanApprovalDecision(required=True, approval_granted=True, approver="   ")
-
-    with pytest.raises(ValidationError):
-        HumanApprovalDecision(
+        HumanReviewDecision(
             required=True,
-            approval_granted=False,
+            action="not_a_review_action",
+            approver="alice",
+        )
+
+
+def test_human_review_decision_rejects_required_false():
+    with pytest.raises(ValidationError):
+        HumanReviewDecision(
+            required=False,
+            action=HumanReviewAction.APPROVE_ESCALATION,
+            approver="alice",
+        )
+
+
+def test_human_review_decision_rejects_blank_approver():
+    with pytest.raises(ValidationError):
+        HumanReviewDecision(
+            required=True,
+            action=HumanReviewAction.CREATE_STANDARD_TICKET,
+            approver="   ",
+        )
+
+
+def test_human_review_decision_rejects_blank_optional_notes():
+    with pytest.raises(ValidationError):
+        HumanReviewDecision(
+            required=True,
+            action=HumanReviewAction.REJECT_REPORT,
             approver="bob",
             notes="   ",
         )
 
 
-# WorkflowResult human approval state tests
+# WorkflowResult human review state tests
 
 
-def test_waiting_for_human_approval_requires_human_approval_flag():
+def test_awaiting_human_review_requires_human_review_flag():
     with pytest.raises(ValidationError):
-        WorkflowResult(status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL)
+        WorkflowResult(status=WorkflowStatus.AWAITING_HUMAN_REVIEW)
 
 
-def test_waiting_for_human_approval_with_flag_is_valid():
+def test_awaiting_human_review_with_flag_is_valid():
     result = WorkflowResult(
-        status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+        status=WorkflowStatus.AWAITING_HUMAN_REVIEW,
         selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-        human_approval_required=True,
+        human_review_required=True,
     )
-    assert result.status == WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL
-    assert result.human_approval_required is True
+    assert result.status == WorkflowStatus.AWAITING_HUMAN_REVIEW
+    assert result.human_review_required is True
+    assert result.human_review_action is None
 
 
 @pytest.mark.parametrize(
     ("field_name", "field_value"),
     [
         ("approval_granted", False),
+        ("human_review_action", HumanReviewAction.REJECT_REPORT),
         ("final_action", "Create an escalation ticket."),
         ("error", "unexpected error"),
     ],
 )
-def test_waiting_for_human_approval_rejects_terminal_fields(
+def test_awaiting_human_review_rejects_terminal_fields(
     field_name,
     field_value,
 ):
     with pytest.raises(ValidationError):
         WorkflowResult(
-            status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+            status=WorkflowStatus.AWAITING_HUMAN_REVIEW,
             selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            human_approval_required=True,
+            human_review_required=True,
             **{field_name: field_value},
         )
 
 
-def test_approval_granted_requires_human_approval_flag():
+def test_approval_granted_requires_human_review_flag():
     with pytest.raises(ValidationError):
         WorkflowResult(
             status=WorkflowStatus.ROUTED,
@@ -493,35 +496,100 @@ def test_approval_granted_requires_human_approval_flag():
         )
 
 
-def test_approved_status_requires_granted_approval():
-    result = WorkflowResult(
-        status=WorkflowStatus.APPROVED,
-        selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-        human_approval_required=True,
-        approval_granted=True,
-    )
-    assert result.status == WorkflowStatus.APPROVED
-    assert result.approval_granted is True
-
-
-def test_approved_status_without_granted_approval_rejected():
+def test_human_review_action_requires_human_review_flag():
     with pytest.raises(ValidationError):
         WorkflowResult(
-            status=WorkflowStatus.APPROVED,
-            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            human_approval_required=True,
-            approval_granted=None,
+            status=WorkflowStatus.ROUTED,
+            human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
         )
 
 
-def test_rejected_status_requires_rejected_approval():
+@pytest.mark.parametrize(
+    ("action", "approval_granted"),
+    [
+        (HumanReviewAction.APPROVE_ESCALATION, None),
+        (HumanReviewAction.CREATE_STANDARD_TICKET, True),
+        (HumanReviewAction.REJECT_REPORT, None),
+    ],
+)
+def test_human_review_action_must_match_approval_summary(
+    action,
+    approval_granted,
+):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            human_review_required=True,
+            human_review_action=action,
+            approval_granted=approval_granted,
+        )
+
+
+def test_escalation_approved_status_requires_escalation_review_action():
     result = WorkflowResult(
-        status=WorkflowStatus.REJECTED,
+        status=WorkflowStatus.ESCALATION_APPROVED,
         selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-        human_approval_required=True,
+        human_review_required=True,
+        human_review_action=HumanReviewAction.APPROVE_ESCALATION,
+        approval_granted=True,
+    )
+    assert result.status == WorkflowStatus.ESCALATION_APPROVED
+    assert result.human_review_action == HumanReviewAction.APPROVE_ESCALATION
+    assert result.approval_granted is True
+
+
+def test_escalation_approved_status_without_escalation_action_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ESCALATION_APPROVED,
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            human_review_required=True,
+            approval_granted=True,
+        )
+
+
+def test_standard_ticket_selected_status_requires_standard_ticket_action():
+    result = WorkflowResult(
+        status=WorkflowStatus.STANDARD_TICKET_SELECTED,
+        selected_route=RouteName.CREATE_STANDARD_TICKET,
+        human_review_required=True,
+        human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
+        approval_granted=None,
+    )
+    assert result.status == WorkflowStatus.STANDARD_TICKET_SELECTED
+    assert result.human_review_action == HumanReviewAction.CREATE_STANDARD_TICKET
+    assert result.approval_granted is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("final_action", "Create a standard bug ticket."),
+        ("error", "unexpected error"),
+    ],
+)
+def test_standard_ticket_selected_status_rejects_terminal_fields(field_name, field_value):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.STANDARD_TICKET_SELECTED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
+            **{field_name: field_value},
+        )
+
+
+def test_report_rejected_status_requires_reject_report_action():
+    result = WorkflowResult(
+        status=WorkflowStatus.REPORT_REJECTED,
+        selected_route=RouteName.LOG_REJECTION,
+        human_review_required=True,
+        human_review_action=HumanReviewAction.REJECT_REPORT,
         approval_granted=False,
     )
-    assert result.status == WorkflowStatus.REJECTED
+    assert result.status == WorkflowStatus.REPORT_REJECTED
+    assert result.human_review_action == HumanReviewAction.REJECT_REPORT
     assert result.approval_granted is False
 
 
@@ -532,59 +600,104 @@ def test_rejected_status_requires_rejected_approval():
         ("error", "unexpected error"),
     ],
 )
-def test_rejected_status_rejects_terminal_fields(field_name, field_value):
+def test_report_rejected_status_rejects_terminal_fields(field_name, field_value):
     with pytest.raises(ValidationError):
         WorkflowResult(
-            status=WorkflowStatus.REJECTED,
+            status=WorkflowStatus.REPORT_REJECTED,
             selected_route=RouteName.LOG_REJECTION,
-            human_approval_required=True,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.REJECT_REPORT,
             approval_granted=False,
             **{field_name: field_value},
         )
 
 
-def test_rejected_status_with_granted_approval_rejected():
+def test_report_rejected_status_with_granted_approval_rejected():
     with pytest.raises(ValidationError):
         WorkflowResult(
-            status=WorkflowStatus.REJECTED,
-            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            human_approval_required=True,
+            status=WorkflowStatus.REPORT_REJECTED,
+            selected_route=RouteName.LOG_REJECTION,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.REJECT_REPORT,
             approval_granted=True,
         )
 
 
-def test_escalation_ticket_route_requires_granted_approval():
+def test_escalation_ticket_route_requires_escalation_review_action():
     with pytest.raises(ValidationError):
         WorkflowResult(
-            status=WorkflowStatus.ROUTED,
+            status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_ESCALATION_TICKET,
-            human_approval_required=True,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.REJECT_REPORT,
             approval_granted=False,
+            final_action="Created urgent escalation ticket.",
         )
 
 
-def test_escalation_ticket_route_with_granted_approval_is_valid():
+def test_escalation_ticket_route_with_escalation_action_is_valid():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_ESCALATION_TICKET,
-        human_approval_required=True,
+        human_review_required=True,
+        human_review_action=HumanReviewAction.APPROVE_ESCALATION,
         approval_granted=True,
         final_action="Created urgent escalation ticket.",
     )
     assert result.selected_route == RouteName.CREATE_ESCALATION_TICKET
+    assert result.human_review_action == HumanReviewAction.APPROVE_ESCALATION
     assert result.approval_granted is True
+
+
+def test_standard_ticket_route_after_review_is_valid():
+    result = WorkflowResult(
+        status=WorkflowStatus.COMPLETED,
+        selected_route=RouteName.CREATE_STANDARD_TICKET,
+        human_review_required=True,
+        human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
+        approval_granted=None,
+        final_action="Create a standard bug ticket.",
+    )
+    assert result.selected_route == RouteName.CREATE_STANDARD_TICKET
+    assert result.human_review_action == HumanReviewAction.CREATE_STANDARD_TICKET
+    assert result.approval_granted is None
+
+
+def test_standard_ticket_route_after_review_rejects_escalation_action():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.APPROVE_ESCALATION,
+            approval_granted=True,
+            final_action="Create a standard bug ticket.",
+        )
+
+
+def test_log_rejection_route_requires_reject_report_action():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.REPORT_REJECTED,
+            selected_route=RouteName.LOG_REJECTION,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
+            approval_granted=None,
+        )
 
 
 def test_direct_escalation_without_required_approval_is_valid():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_ESCALATION_TICKET,
-        human_approval_required=False,
+        human_review_required=False,
+        human_review_action=None,
         approval_granted=None,
         final_action="Created escalation ticket directly.",
     )
 
     assert result.selected_route == RouteName.CREATE_ESCALATION_TICKET
-    assert result.human_approval_required is False
+    assert result.human_review_required is False
+    assert result.human_review_action is None
     assert result.approval_granted is None
     assert result.final_action == "Created escalation ticket directly."

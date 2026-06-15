@@ -1,4 +1,4 @@
-"""Human approval executor support for bug triage workflows."""
+"""Human review executor support for bug triage workflows."""
 
 from __future__ import annotations
 
@@ -7,7 +7,8 @@ from typing import Any
 from agent_framework import Executor, WorkflowContext, handler, response_handler
 
 from src.models import (
-    HumanApprovalDecision,
+    HumanReviewAction,
+    HumanReviewDecision,
     RouteName,
     WorkflowResult,
     WorkflowStatus,
@@ -20,11 +21,11 @@ from src.workflow_messages import (
 from src.workflow_trace import WorkflowTrace
 
 
-class HumanApprovalExecutor(Executor):
-    """Pause the workflow for a typed human approval decision."""
+class HumanReviewExecutor(Executor):
+    """Pause the workflow for a typed human review decision."""
 
     def __init__(self, trace: WorkflowTrace) -> None:
-        super().__init__(id="request_human_approval_executor")
+        super().__init__(id="request_human_review_executor")
         self._trace = trace
 
     @handler
@@ -34,15 +35,15 @@ class HumanApprovalExecutor(Executor):
         ctx: WorkflowContext[HumanApprovalOutcome, WorkflowResult],
     ) -> None:
         self._trace.append(
-            WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
-            "Waiting for human approval.",
-            "request_human_approval_executor",
+            WorkflowStatus.AWAITING_HUMAN_REVIEW,
+            "Waiting for human review.",
+            "request_human_review_executor",
         )
         waiting_result = WorkflowResult(
-            status=WorkflowStatus.WAITING_FOR_HUMAN_APPROVAL,
+            status=WorkflowStatus.AWAITING_HUMAN_REVIEW,
             selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
             classification=routed_report.classification,
-            human_approval_required=True,
+            human_review_required=True,
             approval_granted=None,
             final_action=None,
             error=None,
@@ -54,7 +55,8 @@ class HumanApprovalExecutor(Executor):
             request_data=HumanApprovalRequest(
                 routed_report=routed_report,
                 prompt=(
-                    "Approve or reject escalation of this bug report. "
+                    "Choose escalation, standard-ticket handling, or rejection "
+                    "for this bug report. "
                     f"Category: {routed_report.classification.category.value}; "
                     f"urgency: {routed_report.classification.urgency.value}; "
                     f"sentiment: {routed_report.classification.sentiment.value}; "
@@ -63,12 +65,12 @@ class HumanApprovalExecutor(Executor):
                     f"{routed_report.route_decision.reason or 'not provided'}."
                 ),
             ),
-            response_type=HumanApprovalDecision,
+            response_type=HumanReviewDecision,
         )
 
     @response_handler(
         request=HumanApprovalRequest,
-        response=HumanApprovalDecision,
+        response=HumanReviewDecision,
         output=HumanApprovalOutcome,
     )
     async def handle_decision(
@@ -85,13 +87,13 @@ class HumanApprovalExecutor(Executor):
         )
 
 
-def approval_matches(expected_approval: bool):
-    """Create a switch-case predicate for an approval outcome."""
+def review_action_matches(expected_action: HumanReviewAction):
+    """Create a switch-case predicate for a human review action."""
 
     def condition(message: Any) -> bool:
         return (
             isinstance(message, HumanApprovalOutcome)
-            and message.decision.approval_granted is expected_approval
+            and message.decision.action == expected_action
         )
 
     return condition

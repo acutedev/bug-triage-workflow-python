@@ -1,5 +1,5 @@
-pydantic
-pytest
-python-dotenv
-openai
-agent-framework
+pydantic>=2.0,<3.0
+pytest>=8.0,<9.0
+python-dotenv>=1.0,<2.0
+openai>=1.0,<3.0
+agent-framework>=1.0,<2.0

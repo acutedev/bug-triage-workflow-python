@@ -47,7 +47,7 @@ def make_preprocessed_report(*, has_missing_info: bool = False) -> PreprocessedB
 # Human approval route tests
 
 
-def test_security_category_requires_human_approval():
+def test_security_category_requires_human_review():
     classification = make_classification(
         category=BugCategory.SECURITY,
         urgency=Urgency.MEDIUM,
@@ -59,7 +59,7 @@ def test_security_category_requires_human_approval():
     assert decision.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
 
 
-def test_data_loss_category_requires_human_approval():
+def test_data_loss_category_requires_human_review():
     classification = make_classification(
         category=BugCategory.DATA_LOSS,
         urgency=Urgency.MEDIUM,
@@ -71,7 +71,7 @@ def test_data_loss_category_requires_human_approval():
     assert decision.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
 
 
-def test_critical_urgency_requires_human_approval():
+def test_critical_urgency_requires_human_review():
     classification = make_classification(
         category=BugCategory.PERFORMANCE,
         urgency=Urgency.CRITICAL,
@@ -84,7 +84,7 @@ def test_critical_urgency_requires_human_approval():
 
 
 
-def test_high_urgency_angry_sentiment_requires_human_approval():
+def test_high_urgency_angry_sentiment_requires_human_review():
     classification = make_classification(
         category=BugCategory.AUTHENTICATION,
         urgency=Urgency.HIGH,
@@ -97,7 +97,7 @@ def test_high_urgency_angry_sentiment_requires_human_approval():
     assert decision.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
 
 
-def test_high_urgency_frustrated_sentiment_requires_human_approval():
+def test_high_urgency_frustrated_sentiment_requires_human_review():
     classification = make_classification(
         category=BugCategory.AUTHENTICATION,
         urgency=Urgency.HIGH,
@@ -137,7 +137,7 @@ def test_preprocessed_missing_info_routes_to_request_more_info():
 # Standard ticket route tests
 
 
-def test_high_urgency_neutral_sentiment_does_not_require_human_approval():
+def test_high_urgency_neutral_sentiment_does_not_require_human_review():
     classification = make_classification(
         category=BugCategory.AUTHENTICATION,
         urgency=Urgency.HIGH,
@@ -158,7 +158,7 @@ def test_high_urgency_neutral_sentiment_does_not_require_human_approval():
         (Urgency.HIGH, Sentiment.CONFUSED),
     ],
 )
-def test_non_risky_boundary_combinations_do_not_require_human_approval(
+def test_non_risky_boundary_combinations_do_not_require_human_review(
     urgency: Urgency,
     sentiment: Sentiment,
 ):

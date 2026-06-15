@@ -35,8 +35,8 @@ def _has_missing_information(
     return bool(classification.missing_info)
 
 
-def _requires_human_approval(classification: TriageClassification) -> bool:
-    """Return whether classification requires human approval before action."""
+def _requires_human_review(classification: TriageClassification) -> bool:
+    """Return whether classification requires human review before action."""
     if classification.category in _RISKY_CATEGORIES:
         return True
 
@@ -59,7 +59,7 @@ def route_triage(
     """Select the next route for a classified bug report.
 
     Routing priority:
-    1. Risky/security/data-loss/critical cases require human approval.
+    1. Risky/security/data-loss/critical cases require human review.
     2. Missing information requests clarification.
     3. Everything else becomes a standard ticket.
 
@@ -71,10 +71,10 @@ def route_triage(
     Returns:
         A validated RouteDecision.
     """
-    if _requires_human_approval(classification):
+    if _requires_human_review(classification):
         decision = RouteDecision(
             selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
-            reason="Risky or high-urgency report requires human approval before action.",
+            reason="Risky or high-urgency report requires human review before action.",
         )
     elif _has_missing_information(preprocessed_report, classification):
         decision = RouteDecision(
