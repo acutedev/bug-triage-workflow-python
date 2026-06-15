@@ -1,0 +1,398 @@
+"""Run deterministic demo scenarios for the bug triage workflow."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import sys
+from collections.abc import AsyncIterable, Awaitable, Callable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from agent_framework import (  # noqa: E402
+    Agent,
+    ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    Message,
+    ResponseStream,
+)
+from openai import OpenAIError  # noqa: E402
+
+from src.config import load_config  # noqa: E402
+from src.logging_config import configure_logging  # noqa: E402
+from src.models import (  # noqa: E402
+    HumanReviewAction,
+    HumanReviewDecision,
+    RouteName,
+    TriageClassification,
+    WorkflowResult,
+    WorkflowStatus,
+)
+from src.openai_provider import build_classifier_agent  # noqa: E402
+from src.workflow import build_bug_triage_workflow  # noqa: E402
+
+
+COMPLETE_BUG_REPORT = """
+In production on Chrome using macOS, when I click Save on the profile page,
+the form shows "Unable to save changes" instead of saving my updated display
+name. It should save successfully and show the updated profile.
+""".strip()
+
+INCOMPLETE_BUG_REPORT = "The login page is broken."
+
+CRITICAL_SECURITY_REPORT = """
+In production on Chrome using Windows, a standard user can open the account
+details URL with another account ID and view that user's private billing data.
+The page should only show the signed-in user's account.
+""".strip()
+
+
+class ScenarioValidationError(ValueError):
+    """Raised when a scenario returns a result that does not match expectations."""
+
+
+@dataclass(frozen=True)
+class ScenarioSpec:
+    name: str
+    report: str
+    expected_status: WorkflowStatus
+    expected_route: RouteName | None
+    expected_human_review_required: bool
+    expected_human_review_action: HumanReviewAction | None
+    expected_approval_granted: bool | None
+    human_approval_enabled: bool = True
+    review_decision: HumanReviewDecision | None = None
+    use_fake_classifier: bool = False
+
+
+SCENARIOS: dict[str, ScenarioSpec] = {
+    "standard-ticket": ScenarioSpec(
+        name="standard-ticket",
+        report=COMPLETE_BUG_REPORT,
+        expected_status=WorkflowStatus.COMPLETED,
+        expected_route=RouteName.CREATE_STANDARD_TICKET,
+        expected_human_review_required=False,
+        expected_human_review_action=None,
+        expected_approval_granted=None,
+    ),
+    "request-more-info": ScenarioSpec(
+        name="request-more-info",
+        report=INCOMPLETE_BUG_REPORT,
+        expected_status=WorkflowStatus.COMPLETED,
+        expected_route=RouteName.REQUEST_MORE_INFO,
+        expected_human_review_required=False,
+        expected_human_review_action=None,
+        expected_approval_granted=None,
+    ),
+    "escalation-approved": ScenarioSpec(
+        name="escalation-approved",
+        report=CRITICAL_SECURITY_REPORT,
+        expected_status=WorkflowStatus.COMPLETED,
+        expected_route=RouteName.CREATE_ESCALATION_TICKET,
+        expected_human_review_required=True,
+        expected_human_review_action=HumanReviewAction.APPROVE_ESCALATION,
+        expected_approval_granted=True,
+        review_decision=HumanReviewDecision(
+            required=True,
+            action=HumanReviewAction.APPROVE_ESCALATION,
+            approver="Demo Reviewer",
+            notes="Approved for escalation demo.",
+        ),
+    ),
+    "standard-ticket-selected": ScenarioSpec(
+        name="standard-ticket-selected",
+        report=CRITICAL_SECURITY_REPORT,
+        expected_status=WorkflowStatus.COMPLETED,
+        expected_route=RouteName.CREATE_STANDARD_TICKET,
+        expected_human_review_required=True,
+        expected_human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
+        expected_approval_granted=None,
+        review_decision=HumanReviewDecision(
+            required=True,
+            action=HumanReviewAction.CREATE_STANDARD_TICKET,
+            approver="Demo Reviewer",
+            notes="Standard ticket selected for demo.",
+        ),
+    ),
+    "report-rejected": ScenarioSpec(
+        name="report-rejected",
+        report=CRITICAL_SECURITY_REPORT,
+        expected_status=WorkflowStatus.REPORT_REJECTED,
+        expected_route=RouteName.LOG_REJECTION,
+        expected_human_review_required=True,
+        expected_human_review_action=HumanReviewAction.REJECT_REPORT,
+        expected_approval_granted=False,
+        review_decision=HumanReviewDecision(
+            required=True,
+            action=HumanReviewAction.REJECT_REPORT,
+            approver="Demo Reviewer",
+            notes="Report rejected for demo.",
+        ),
+    ),
+    "direct-escalation": ScenarioSpec(
+        name="direct-escalation",
+        report=CRITICAL_SECURITY_REPORT,
+        expected_status=WorkflowStatus.COMPLETED,
+        expected_route=RouteName.CREATE_ESCALATION_TICKET,
+        expected_human_review_required=False,
+        expected_human_review_action=None,
+        expected_approval_granted=None,
+        human_approval_enabled=False,
+    ),
+    "classifier-failure": ScenarioSpec(
+        name="classifier-failure",
+        report=COMPLETE_BUG_REPORT,
+        expected_status=WorkflowStatus.FAILED,
+        expected_route=None,
+        expected_human_review_required=False,
+        expected_human_review_action=None,
+        expected_approval_granted=None,
+        use_fake_classifier=True,
+    ),
+}
+
+
+class MalformedClassifierClient:
+    """Deterministic MAF chat client that returns malformed classifier output."""
+
+    def get_response(
+        self,
+        messages: str | Message | list[str] | list[Message],
+        *,
+        stream: bool = False,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
+        del messages, kwargs
+        response_text = json.dumps({"invalid": "classifier response"})
+
+        if stream:
+
+            async def _stream() -> AsyncIterable[ChatResponseUpdate]:
+                yield ChatResponseUpdate(
+                    contents=[Content.from_text(response_text)],
+                    role="assistant",
+                    finish_reason="stop",
+                )
+
+            def _finalize(updates: list[ChatResponseUpdate]) -> ChatResponse:
+                return ChatResponse.from_updates(
+                    updates,
+                    output_format_type=(options or {}).get("response_format"),
+                )
+
+            return ResponseStream(_stream(), finalizer=_finalize)
+
+        async def _get() -> ChatResponse:
+            return ChatResponse(
+                messages=Message(role="assistant", contents=[response_text])
+            )
+
+        return _get()
+
+
+def build_malformed_classifier_agent() -> Agent:
+    """Build a deterministic fake classifier agent for failure demos."""
+    return Agent(
+        client=MalformedClassifierClient(),
+        name="classifier_agent",
+        instructions="Return malformed classifier output for demo validation.",
+        default_options={"response_format": TriageClassification},
+    )
+
+
+def _enum_value(value: Any) -> Any:
+    return value.value if hasattr(value, "value") else value
+
+
+def print_event(event: object) -> None:
+    """Print one stable line for a streamed workflow event."""
+    event_type = getattr(event, "type", type(event).__name__)
+    is_request_info = event_type == "request_info"
+    executor_id = getattr(event, "executor_id", None)
+    if is_request_info:
+        executor_id = getattr(event, "source_executor_id", executor_id)
+
+    parts = [f"event={event_type}"]
+    if executor_id:
+        parts.append(f"executor={executor_id}")
+    if is_request_info:
+        parts.append("request_info=paused")
+    print(" | ".join(parts))
+
+
+def print_result_summary(result: WorkflowResult) -> None:
+    """Print stable final-result fields that are useful in demos."""
+    print(f"final_status={result.status.value}")
+    print(f"selected_route={_enum_value(result.selected_route)}")
+    print(f"human_review_required={result.human_review_required}")
+    print(f"human_review_action={_enum_value(result.human_review_action)}")
+    print(f"approval_granted={result.approval_granted}")
+
+
+def print_final_result(result: WorkflowResult) -> None:
+    """Print the final WorkflowResult as formatted JSON."""
+    print("FINAL WORKFLOW RESULT")
+    print(result.model_dump_json(indent=2))
+
+
+def validate_result(spec: ScenarioSpec, result: WorkflowResult) -> None:
+    """Validate a workflow result against a demo scenario contract."""
+    checks = {
+        "status": result.status == spec.expected_status,
+        "selected_route": result.selected_route == spec.expected_route,
+        "human_review_required": (
+            result.human_review_required is spec.expected_human_review_required
+        ),
+        "human_review_action": (
+            result.human_review_action == spec.expected_human_review_action
+        ),
+        "approval_granted": result.approval_granted is spec.expected_approval_granted,
+    }
+
+    if spec.name == "classifier-failure":
+        checks.update(
+            {
+                "classification": result.classification is None,
+                "final_action": result.final_action is None,
+                "error": bool(result.error)
+                and "classification failed" in result.error.lower(),
+            }
+        )
+
+    failed_checks = [name for name, passed in checks.items() if not passed]
+    if failed_checks:
+        raise ScenarioValidationError(
+            f"{spec.name} validation failed: {', '.join(failed_checks)}"
+        )
+
+
+def validate_scenario_result(scenario_name: str, result: WorkflowResult) -> None:
+    """Validate a workflow result for a named scenario."""
+    validate_result(SCENARIOS[scenario_name], result)
+
+
+def build_agent_for_scenario(spec: ScenarioSpec) -> Agent:
+    """Build the classifier agent for a scenario."""
+    if spec.use_fake_classifier:
+        return build_malformed_classifier_agent()
+
+    config = load_config()
+    return build_classifier_agent(config)
+
+
+async def run_scenario_workflow(
+    spec: ScenarioSpec,
+    classifier_agent: Agent,
+    *,
+    event_printer: Callable[[object], None] = print_event,
+) -> WorkflowResult:
+    """Run one scenario, including automatic human-review resume."""
+    workflow = build_bug_triage_workflow(
+        classifier_agent,
+        human_approval_enabled=spec.human_approval_enabled,
+    )
+
+    final_result: WorkflowResult | None = None
+    request_event: object | None = None
+
+    async for event in workflow.run(
+        spec.report,
+        stream=True,
+        include_status_events=True,
+    ):
+        event_printer(event)
+        event_result = getattr(event, "data", None)
+        if isinstance(event_result, WorkflowResult):
+            final_result = event_result
+        if getattr(event, "type", None) == "request_info":
+            request_event = event
+
+    if request_event is not None:
+        if spec.review_decision is None:
+            raise RuntimeError("Scenario produced an unexpected human-review request")
+
+        print("request_info=resume")
+        async for event in workflow.run(
+            stream=True,
+            responses={request_event.request_id: spec.review_decision},
+            include_status_events=True,
+        ):
+            event_printer(event)
+            event_result = getattr(event, "data", None)
+            if isinstance(event_result, WorkflowResult):
+                final_result = event_result
+
+    if final_result is None:
+        raise RuntimeError("Scenario completed without a WorkflowResult")
+
+    return final_result
+
+
+async def run_scenario(
+    spec: ScenarioSpec,
+    *,
+    agent_builder: Callable[[ScenarioSpec], Agent] = build_agent_for_scenario,
+    event_printer: Callable[[object], None] = print_event,
+) -> WorkflowResult:
+    """Build dependencies and run a named demo scenario."""
+    classifier_agent = agent_builder(spec)
+    return await run_scenario_workflow(
+        spec,
+        classifier_agent,
+        event_printer=event_printer,
+    )
+
+
+async def run_selected_scenario(scenario_name: str) -> int:
+    """Run, print, and validate a selected scenario."""
+    spec = SCENARIOS[scenario_name]
+    print(f"DEMO SCENARIO: {spec.name}")
+
+    result = await run_scenario(spec)
+    print_result_summary(result)
+    print_final_result(result)
+    validate_result(spec, result)
+    print("DEMO VALIDATION PASSED")
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Command-line entry point."""
+    logger = configure_logging()
+    args = sys.argv[1:] if argv is None else argv
+    supported = ", ".join(SCENARIOS)
+
+    if len(args) != 1 or args[0] not in SCENARIOS:
+        print(
+            f"Usage: python3 scripts/run_demo_scenario.py <scenario>\n"
+            f"Supported scenarios: {supported}",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        return asyncio.run(run_selected_scenario(args[0]))
+    except ValueError as error:
+        print(f"Configuration or validation error: {error}", file=sys.stderr)
+        return 1
+    except OpenAIError as error:
+        print(f"Provider error: {error}", file=sys.stderr)
+        return 1
+    except Exception:
+        logger.exception("Demo scenario failed unexpectedly")
+        print(
+            "Unexpected error: demo scenario failed. See logs for details.",
+            file=sys.stderr,
+        )
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
