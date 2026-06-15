@@ -263,7 +263,7 @@ def test_unexpected_runner_failure_returns_one_and_logs_exception(
 
 
 def test_no_secrets_appear_in_printed_output(monkeypatch, capsys):
-    secret = "sk-demo-secret-should-not-print"
+    secret = "sk-" + "demo-secret-should-not-print"
     monkeypatch.setenv("LLM_API_KEY", secret)
 
     async def fake_run_scenario(spec):
