@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from dataclasses import asdict, is_dataclass
 from typing import Any
 
-from src.config import load_config
+from openai import OpenAIError
+
+from src.config import AppConfig, load_config
+from src.logging_config import configure_logging
 from src.models import HumanReviewAction, HumanReviewDecision, WorkflowResult
 from src.openai_provider import build_classifier_agent
 from src.workflow import build_bug_triage_workflow
-
-from src.logging_config import configure_logging
 
 SAMPLE_BUG_REPORT = """
 Users can reset another user's password by changing the account ID in the
@@ -139,10 +141,12 @@ def read_human_review_decision() -> HumanReviewDecision:
     )
 
 
-async def run_demo() -> WorkflowResult:
+async def run_demo(config: AppConfig | None = None) -> WorkflowResult:
     """Run the sample bug report through the real workflow graph."""
     configure_logging()
-    config = load_config()
+    if config is None:
+        config = load_config()
+
     classifier_agent = build_classifier_agent(config)
     workflow = build_bug_triage_workflow(
         classifier_agent,
@@ -196,10 +200,35 @@ async def run_demo() -> WorkflowResult:
     return final_result
 
 
-async def main() -> None:
+async def main() -> int:
     """Command-line entry point."""
-    await run_demo()
+    logger = configure_logging()
+
+    try:
+        try:
+            config = load_config()
+        except ValueError as error:
+            print(f"Configuration error: {error}", file=sys.stderr)
+            return 2
+        await run_demo(config)
+    except KeyboardInterrupt:
+        print("Operation cancelled by user.", file=sys.stderr)
+        return 130
+    except EOFError:
+        print("Input closed; bug triage demo cancelled.", file=sys.stderr)
+        return 1
+    except OpenAIError as error:
+        print(f"Provider error: {error}", file=sys.stderr)
+        return 1
+    except Exception:
+        logger.exception("Bug triage CLI failed unexpectedly")
+        print(
+            "Unexpected error: bug triage demo failed. See logs for details.",
+            file=sys.stderr,
+        )
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    raise SystemExit(asyncio.run(main()))
