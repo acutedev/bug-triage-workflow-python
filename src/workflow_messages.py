@@ -30,15 +30,15 @@ class RoutedBugReport:
 
 
 @dataclass(frozen=True)
-class HumanApprovalRequest:
-    """Information presented to the human approver."""
+class HumanReviewRequest:
+    """Information presented for human review."""
 
     routed_report: RoutedBugReport
     prompt: str
 
 
 @dataclass(frozen=True)
-class HumanApprovalOutcome:
+class HumanReviewOutcome:
     """Human review decision passed to the selected terminal branch."""
 
     routed_report: RoutedBugReport

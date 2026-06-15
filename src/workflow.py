@@ -41,7 +41,7 @@ from src.preprocess import preprocess_bug_report
 from src.router import route_triage
 from src.workflow_messages import (
     ClassifiedBugReport,
-    HumanApprovalOutcome,
+    HumanReviewOutcome,
     RoutedBugReport,
 )
 from src.workflow_results import build_completed_result, build_failed_result
@@ -219,13 +219,13 @@ def build_bug_triage_workflow(
 
     @executor(id="create_standard_ticket_executor")
     async def create_standard_ticket_executor(
-        routed_or_reviewed_report: RoutedBugReport | HumanApprovalOutcome,
+        routed_or_reviewed_report: RoutedBugReport | HumanReviewOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         human_review_action = None
         human_review_required = False
 
-        if isinstance(routed_or_reviewed_report, HumanApprovalOutcome):
+        if isinstance(routed_or_reviewed_report, HumanReviewOutcome):
             outcome = routed_or_reviewed_report
             human_review_action = HumanReviewAction.CREATE_STANDARD_TICKET
             human_review_required = True
@@ -297,7 +297,7 @@ def build_bug_triage_workflow(
 
     @executor(id="create_escalation_ticket_executor")
     async def create_escalation_ticket_executor(
-        outcome: HumanApprovalOutcome,
+        outcome: HumanReviewOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         workflow_trace.append(
@@ -328,7 +328,7 @@ def build_bug_triage_workflow(
 
     @executor(id="log_rejection_executor")
     async def log_rejection_executor(
-        outcome: HumanApprovalOutcome,
+        outcome: HumanReviewOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         workflow_trace.append(
@@ -353,7 +353,7 @@ def build_bug_triage_workflow(
 
     @executor(id="unexpected_human_review_action_executor")
     async def unexpected_human_review_action_executor(
-        outcome: HumanApprovalOutcome,
+        outcome: HumanReviewOutcome,
         ctx: WorkflowContext[Never, WorkflowResult],
     ) -> None:
         error_message = (

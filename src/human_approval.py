@@ -14,8 +14,8 @@ from src.models import (
     WorkflowStatus,
 )
 from src.workflow_messages import (
-    HumanApprovalOutcome,
-    HumanApprovalRequest,
+    HumanReviewOutcome,
+    HumanReviewRequest,
     RoutedBugReport,
 )
 from src.workflow_trace import WorkflowTrace
@@ -29,10 +29,10 @@ class HumanReviewExecutor(Executor):
         self._trace = trace
 
     @handler
-    async def request_approval(
+    async def request_review(
         self,
         routed_report: RoutedBugReport,
-        ctx: WorkflowContext[HumanApprovalOutcome, WorkflowResult],
+        ctx: WorkflowContext[HumanReviewOutcome, WorkflowResult],
     ) -> None:
         self._trace.append(
             WorkflowStatus.AWAITING_HUMAN_REVIEW,
@@ -52,7 +52,7 @@ class HumanReviewExecutor(Executor):
         await ctx.yield_output(waiting_result)
 
         await ctx.request_info(
-            request_data=HumanApprovalRequest(
+            request_data=HumanReviewRequest(
                 routed_report=routed_report,
                 prompt=(
                     "Choose escalation, standard-ticket handling, or rejection "
@@ -69,9 +69,9 @@ class HumanReviewExecutor(Executor):
         )
 
     @response_handler(
-        request=HumanApprovalRequest,
+        request=HumanReviewRequest,
         response=HumanReviewDecision,
-        output=HumanApprovalOutcome,
+        output=HumanReviewOutcome,
     )
     async def handle_decision(
         self,
@@ -80,7 +80,7 @@ class HumanReviewExecutor(Executor):
         ctx,
     ) -> None:
         await ctx.send_message(
-            HumanApprovalOutcome(
+            HumanReviewOutcome(
                 routed_report=original_request.routed_report,
                 decision=decision,
             )
@@ -92,7 +92,7 @@ def review_action_matches(expected_action: HumanReviewAction):
 
     def condition(message: Any) -> bool:
         return (
-            isinstance(message, HumanApprovalOutcome)
+            isinstance(message, HumanReviewOutcome)
             and message.decision.action == expected_action
         )
 
