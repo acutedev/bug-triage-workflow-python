@@ -155,6 +155,22 @@ def workflow_results_from_events(events: list[object]) -> list[WorkflowResult]:
     ]
 
 
+async def collect_stream_events(
+    raw_text: str,
+    classifier_agent: Agent,
+    *,
+    human_approval_enabled: bool = True,
+) -> list[object]:
+    return [
+        event
+        async for event in stream_bug_triage_workflow(
+            raw_text,
+            classifier_agent,
+            human_approval_enabled=human_approval_enabled,
+        )
+    ]
+
+
 def workflow_statuses(result: WorkflowResult) -> list[WorkflowStatus]:
     return [event.status for event in result.event_log]
 
@@ -659,43 +675,33 @@ def test_disabled_human_review_stream_does_not_request_information():
     assert final_result.approval_granted is None
 
 
-def test_workflow_returns_failed_result_for_preprocessing_validation_error(
-    monkeypatch,
-):
-    def raise_preprocessing_error(raw_text: str):
-        raise ValueError("Invalid bug report input.")
+def test_workflow_returns_single_failed_result_for_preprocessing_validation_error():
+    classifier_agent, client = make_classifier_agent()
 
-    monkeypatch.setattr(
-        workflow_module,
-        "preprocess_bug_report",
-        raise_preprocessing_error,
-    )
+    events = asyncio.run(collect_stream_events("   ", classifier_agent))
+    workflow_results = workflow_results_from_events(events)
 
-    result = asyncio.run(
-        run_bug_triage_workflow(
-            "Invalid bug report.",
-            make_classifier_agent()[0],
-        )
-    )
+    assert len(workflow_results) == 1
+    result = workflow_results[0]
 
     print_workflow_result("failed preprocessing workflow", result)
 
     assert result.status == WorkflowStatus.FAILED
-    assert result.error == (
-        "Bug preprocessing failed: Invalid bug report input."
-    )
+    assert result.error
+    assert "Bug preprocessing failed:" in result.error
     assert result.final_action is None
     assert [event.status for event in result.event_log] == [
         WorkflowStatus.RECEIVED,
         WorkflowStatus.FAILED,
     ]
     assert result.event_log[-1].executor == "preprocess_executor"
-    assert result.event_log[-1].data["error_type"] == "ValueError"
+    assert result.event_log[-1].data["error_type"] == "ValidationError"
+    assert client.call_count == 0
 
 
-def test_workflow_returns_failed_result_for_invalid_classifier_output():
-    result = asyncio.run(
-        run_bug_triage_workflow(
+def test_workflow_returns_single_failed_result_for_invalid_classifier_output():
+    events = asyncio.run(
+        collect_stream_events(
             (
                 "In production on Chrome using macOS, when I click save, "
                 "the page shows an error instead of saving. "
@@ -704,11 +710,16 @@ def test_workflow_returns_failed_result_for_invalid_classifier_output():
             make_classifier_agent({"invalid": "classifier response"})[0],
         )
     )
+    workflow_results = workflow_results_from_events(events)
+
+    assert len(workflow_results) == 1
+    result = workflow_results[0]
 
     print_workflow_result("failed classifier workflow", result)
 
     assert result.status == WorkflowStatus.FAILED
     assert result.error
+    assert "Bug classification failed:" in result.error
     assert result.final_action is None
     assert [event.status for event in result.event_log] == [
         WorkflowStatus.RECEIVED,
@@ -719,81 +730,92 @@ def test_workflow_returns_failed_result_for_invalid_classifier_output():
     assert result.event_log[-1].data["error_type"] == "ValidationError"
 
 
-def test_workflow_returns_failed_result_for_unexpected_llm_client_error():
-    result = asyncio.run(
-        run_bug_triage_workflow(
-            (
-                "In production on Chrome using macOS, when I click save, "
-                "the page shows an error instead of saving. "
-                "It should save successfully."
-            ),
-            make_classifier_agent(
-                error=RuntimeError("LLM provider unavailable.")
-            )[0],
-        )
+def test_unexpected_classifier_parser_error_propagates(monkeypatch):
+    parser_error = RuntimeError("classifier parser defect")
+    events: list[object] = []
+
+    def fail_parser(_response_text):
+        raise parser_error
+
+    monkeypatch.setattr(
+        workflow_module,
+        "parse_classification_response",
+        fail_parser,
     )
 
-    print_workflow_result("failed LLM client workflow", result)
-
-    assert result.status == WorkflowStatus.FAILED
-    assert result.error == (
-        "Bug classification failed: LLM provider unavailable."
-    )
-    assert result.final_action is None
-    assert [event.status for event in result.event_log] == [
-        WorkflowStatus.RECEIVED,
-        WorkflowStatus.PREPROCESSED,
-        WorkflowStatus.FAILED,
-    ]
-    assert result.event_log[-1].executor == "classifier_agent"
-    assert result.event_log[-1].data["error_type"] == "RuntimeError"
-
-
-def test_workflow_stream_emits_failed_result_for_unexpected_llm_client_error():
     async def collect_events():
-        stream = stream_bug_triage_workflow(
+        async for event in stream_bug_triage_workflow(
             (
                 "In production on Chrome using macOS, when I click save, "
                 "the page shows an error instead of saving. "
                 "It should save successfully."
             ),
-            make_classifier_agent(
-                error=RuntimeError("LLM provider unavailable.")
-            )[0],
+            make_classifier_agent()[0],
+        ):
+            events.append(event)
+
+    with pytest.raises(RuntimeError, match="classifier parser defect") as exc_info:
+        asyncio.run(collect_events())
+
+    assert exc_info.value is parser_error
+    assert workflow_results_from_events(events) == []
+
+
+def test_workflow_propagates_classifier_provider_runtime_exception():
+    provider_error = RuntimeError("LLM provider unavailable.")
+    result = None
+
+    with pytest.raises(RuntimeError, match="LLM provider unavailable.") as exc_info:
+        result = asyncio.run(
+            run_bug_triage_workflow(
+                (
+                    "In production on Chrome using macOS, when I click save, "
+                    "the page shows an error instead of saving. "
+                    "It should save successfully."
+                ),
+                make_classifier_agent(error=provider_error)[0],
+            )
         )
 
-        return [event async for event in stream]
-
-    events = asyncio.run(collect_events())
-
-    workflow_results = workflow_results_from_events(events)
-
-    assert len(workflow_results) == 1
-    final_result = workflow_results[0]
-    assert final_result.status == WorkflowStatus.FAILED
-    assert final_result.error == (
-        "Bug classification failed: LLM provider unavailable."
-    )
-    assert final_result.final_action is None
-    assert workflow_statuses(final_result) == [
-        WorkflowStatus.RECEIVED,
-        WorkflowStatus.PREPROCESSED,
-        WorkflowStatus.FAILED,
-    ]
-    assert final_result.event_log[-1].executor == "classifier_agent"
-    assert final_result.event_log[-1].data["error_type"] == "RuntimeError"
+    assert exc_info.value is provider_error
+    assert result is None
 
 
-def test_workflow_does_not_mislabel_router_exception_as_classifier_failure(
+def test_workflow_stream_propagates_classifier_provider_runtime_exception():
+    provider_error = RuntimeError("LLM provider unavailable.")
+    events: list[object] = []
+
+    async def collect_events():
+        async for event in stream_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            make_classifier_agent(error=provider_error)[0],
+        ):
+            events.append(event)
+
+    with pytest.raises(RuntimeError, match="LLM provider unavailable.") as exc_info:
+        asyncio.run(collect_events())
+
+    assert exc_info.value is provider_error
+    assert workflow_results_from_events(events) == []
+
+
+def test_workflow_propagates_router_exception(
     monkeypatch,
 ):
+    router_error = RuntimeError("router policy failed")
+    result = None
+
     def raise_router_error(classification, preprocessed_report):
-        raise RuntimeError("router policy failed")
+        raise router_error
 
     monkeypatch.setattr(workflow_module, "route_triage", raise_router_error)
 
-    with pytest.raises(RuntimeError, match="router policy failed"):
-        asyncio.run(
+    with pytest.raises(RuntimeError, match="router policy failed") as exc_info:
+        result = asyncio.run(
             run_bug_triage_workflow(
                 (
                     "In production on Chrome using macOS, when I click save, "
@@ -804,28 +826,71 @@ def test_workflow_does_not_mislabel_router_exception_as_classifier_failure(
             )
         )
 
+    assert exc_info.value is router_error
+    assert result is None
 
-def test_workflow_stream_does_not_mislabel_router_exception_as_classifier_failure(
+
+def test_workflow_stream_propagates_router_exception(
     monkeypatch,
 ):
+    router_error = RuntimeError("router policy failed")
+    events: list[object] = []
+
     def raise_router_error(classification, preprocessed_report):
-        raise RuntimeError("router policy failed")
+        raise router_error
 
     monkeypatch.setattr(workflow_module, "route_triage", raise_router_error)
 
     async def collect_events():
-        stream = stream_bug_triage_workflow(
+        async for event in stream_bug_triage_workflow(
             (
                 "In production on Chrome using macOS, when I click save, "
                 "the page shows an error instead of saving. "
                 "It should save successfully."
             ),
             make_classifier_agent()[0],
-        )
-        return [event async for event in stream]
+        ):
+            events.append(event)
 
-    with pytest.raises(RuntimeError, match="router policy failed"):
+    with pytest.raises(RuntimeError, match="router policy failed") as exc_info:
         asyncio.run(collect_events())
+
+    assert exc_info.value is router_error
+    assert workflow_results_from_events(events) == []
+
+
+def test_workflow_propagates_unexpected_terminal_executor_exception(
+    monkeypatch,
+):
+    terminal_error = RuntimeError("terminal result builder failed")
+    result = None
+
+    def raise_terminal_error(*args, **kwargs):
+        raise terminal_error
+
+    monkeypatch.setattr(
+        workflow_module,
+        "build_completed_result",
+        raise_terminal_error,
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="terminal result builder failed",
+    ) as exc_info:
+        result = asyncio.run(
+            run_bug_triage_workflow(
+                (
+                    "In production on Chrome using macOS, when I click save, "
+                    "the page shows an error instead of saving. "
+                    "It should save successfully."
+                ),
+                make_classifier_agent()[0],
+            )
+        )
+
+    assert exc_info.value is terminal_error
+    assert result is None
 
 
 def test_workflow_stream_emits_final_workflow_result():

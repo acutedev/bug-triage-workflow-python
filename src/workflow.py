@@ -6,6 +6,15 @@ raw report -> preprocess -> native classifier agent -> route -> terminal action
 
 Business logic remains in preprocess.py, classifier.py, and router.py. This
 module is responsible only for Microsoft Agent Framework orchestration.
+
+Exception policy:
+- Expected input and classifier-output validation failures are converted into
+  WorkflowResult(status=FAILED).
+- Provider, router, terminal-executor, framework, and invariant exceptions
+  propagate to the caller so programming defects and infrastructure failures
+  are not silently hidden.
+- The outer CLI boundary is responsible for logging propagated exceptions and
+  presenting a safe user-facing error.
 """
 
 from __future__ import annotations
@@ -22,9 +31,9 @@ from agent_framework import (
     Workflow,
     WorkflowBuilder,
     WorkflowContext,
-    WorkflowEvent,
     executor,
 )
+from pydantic import ValidationError
 from typing_extensions import Never
 
 from src.classifier import build_classification_prompt, parse_classification_response
@@ -154,7 +163,7 @@ def build_bug_triage_workflow(
             classification = parse_classification_response(
                 response.agent_response.text
             )
-        except Exception as error:
+        except (TypeError, ValueError, ValidationError) as error:
             await ctx.yield_output(
                 build_failed_result(
                     error,
@@ -501,24 +510,11 @@ async def run_bug_triage_workflow(
 ) -> WorkflowResult:
     """Run the workflow and return its single validated output."""
 
-    workflow_trace = WorkflowTrace()
     workflow = build_bug_triage_workflow(
         classifier_agent,
         human_approval_enabled=human_approval_enabled,
-        trace=workflow_trace,
     )
-    try:
-        run_result = await workflow.run(raw_text)
-    except Exception as error:
-        if workflow_trace.is_classifier_provider_boundary_active():
-            workflow_trace.exit_classifier_provider_boundary()
-            return build_failed_result(
-                error,
-                stage="classification",
-                executor="classifier_agent",
-                trace=workflow_trace,
-            )
-        raise
+    run_result = await workflow.run(raw_text)
 
     outputs = run_result.get_outputs()
 
@@ -534,41 +530,22 @@ async def run_bug_triage_workflow(
     return result
 
 
-
 async def stream_bug_triage_workflow(
     raw_text: str,
     classifier_agent: Agent,
     *,
     human_approval_enabled: bool = True,
 ):
-    """Stream workflow events and convert native-agent failures to typed output."""
+    """Stream workflow events."""
 
-    workflow_trace = WorkflowTrace()
     workflow = build_bug_triage_workflow(
         classifier_agent,
         human_approval_enabled=human_approval_enabled,
-        trace=workflow_trace,
     )
 
-    try:
-        async for event in workflow.run(
-            raw_text,
-            stream=True,
-            include_status_events=True,
-        ):
-            yield event
-    except Exception as error:
-        if not workflow_trace.is_classifier_provider_boundary_active():
-            raise
-
-        workflow_trace.exit_classifier_provider_boundary()
-        yield WorkflowEvent(
-            "output",
-            executor_id="classifier_agent",
-            data=build_failed_result(
-                error,
-                stage="classification",
-                executor="classifier_agent",
-                trace=workflow_trace,
-            ),
-        )
+    async for event in workflow.run(
+        raw_text,
+        stream=True,
+        include_status_events=True,
+    ):
+        yield event
