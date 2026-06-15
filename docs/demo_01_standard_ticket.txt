@@ -1,0 +1,103 @@
+DEMO SCENARIO: standard-ticket
+{"timestamp": "2026-06-15T03:07:39.311235+00:00", "level": "INFO", "logger": "bug_triage_workflow.openai_provider", "message": "Native classifier agent created", "extra": {"executor": "classifier_agent", "model": "gpt-4.1-mini"}}
+event=started
+event=status
+{"timestamp": "2026-06-15T03:07:39.314444+00:00", "level": "INFO", "logger": "bug_triage_workflow.preprocess", "message": "Bug report preprocessed", "extra": {"executor": "preprocess_bug_report", "missing_info_count": 0, "extracted_field_names": ["browser", "device_or_os", "environment", "module"]}}
+event=executor_invoked | executor=preprocess_executor
+event=executor_completed | executor=preprocess_executor
+event=superstep_started
+event=executor_invoked | executor=classifier_request_executor
+event=executor_completed | executor=classifier_request_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=classifier_agent
+event=executor_completed | executor=classifier_agent
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:41.242628+00:00", "level": "INFO", "logger": "bug_triage_workflow.classifier", "message": "Bug report classification completed", "extra": {"executor": "classifier_agent", "category": "ui_bug", "urgency": "medium", "sentiment": "frustrated", "recommended_route": "create_standard_ticket", "confidence": 0.9}}
+event=executor_invoked | executor=classifier_response_executor
+event=executor_completed | executor=classifier_response_executor
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:41.294494+00:00", "level": "INFO", "logger": "bug_triage_workflow.router", "message": "Triage route selected", "extra": {"executor": "route_triage", "selected_route": "create_standard_ticket", "recommended_route": "create_standard_ticket", "category": "ui_bug", "urgency": "medium", "sentiment": "frustrated"}}
+event=executor_invoked | executor=router_executor
+event=executor_completed | executor=router_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=create_standard_ticket_executor
+event=output | executor=create_standard_ticket_executor
+event=executor_completed | executor=create_standard_ticket_executor
+event=superstep_completed
+event=status
+final_status=completed
+selected_route=create_standard_ticket
+human_review_required=False
+human_review_action=None
+approval_granted=None
+FINAL WORKFLOW RESULT
+{
+  "status": "completed",
+  "selected_route": "create_standard_ticket",
+  "classification": {
+    "category": "ui_bug",
+    "urgency": "medium",
+    "sentiment": "frustrated",
+    "missing_info": [],
+    "recommended_route": "create_standard_ticket",
+    "reasoning": "The report is complete and describes a UI bug causing failure to save profile changes in production. No critical or security concerns.",
+    "confidence": 0.9
+  },
+  "human_review_required": false,
+  "human_review_action": null,
+  "approval_granted": null,
+  "final_action": "Create a standard bug ticket.",
+  "error": null,
+  "event_log": [
+    {
+      "status": "received",
+      "message": "Bug report received.",
+      "executor": "preprocess_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:39.313400Z"
+    },
+    {
+      "status": "preprocessed",
+      "message": "Bug report preprocessed.",
+      "executor": "preprocess_executor",
+      "data": {
+        "missing_info": []
+      },
+      "created_at": "2026-06-15T03:07:39.314504Z"
+    },
+    {
+      "status": "classified",
+      "message": "Bug report classified.",
+      "executor": "classifier_agent",
+      "data": {
+        "category": "ui_bug",
+        "urgency": "medium",
+        "sentiment": "frustrated"
+      },
+      "created_at": "2026-06-15T03:07:41.242744Z"
+    },
+    {
+      "status": "routed",
+      "message": "Bug report routed.",
+      "executor": "router_executor",
+      "data": {
+        "selected_route": "create_standard_ticket"
+      },
+      "created_at": "2026-06-15T03:07:41.294579Z"
+    },
+    {
+      "status": "completed",
+      "message": "Create a standard bug ticket.",
+      "executor": "create_standard_ticket_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:41.346298Z"
+    }
+  ],
+  "created_at": "2026-06-15T03:07:41.346324Z",
+  "updated_at": "2026-06-15T03:07:41.346325Z"
+}
+DEMO VALIDATION PASSED

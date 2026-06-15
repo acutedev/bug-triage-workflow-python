@@ -1,0 +1,115 @@
+DEMO SCENARIO: request-more-info
+{"timestamp": "2026-06-15T03:07:41.955875+00:00", "level": "INFO", "logger": "bug_triage_workflow.openai_provider", "message": "Native classifier agent created", "extra": {"executor": "classifier_agent", "model": "gpt-4.1-mini"}}
+event=started
+event=status
+{"timestamp": "2026-06-15T03:07:41.959524+00:00", "level": "INFO", "logger": "bug_triage_workflow.preprocess", "message": "Bug report preprocessed", "extra": {"executor": "preprocess_bug_report", "missing_info_count": 5, "extracted_field_names": ["module"]}}
+event=executor_invoked | executor=preprocess_executor
+event=executor_completed | executor=preprocess_executor
+event=superstep_started
+event=executor_invoked | executor=classifier_request_executor
+event=executor_completed | executor=classifier_request_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=classifier_agent
+event=executor_completed | executor=classifier_agent
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:46.535069+00:00", "level": "INFO", "logger": "bug_triage_workflow.classifier", "message": "Bug report classification completed", "extra": {"executor": "classifier_agent", "category": "authentication", "urgency": "medium", "sentiment": "neutral", "recommended_route": "request_more_info", "confidence": 0.8}}
+event=executor_invoked | executor=classifier_response_executor
+event=executor_completed | executor=classifier_response_executor
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:46.586754+00:00", "level": "INFO", "logger": "bug_triage_workflow.router", "message": "Triage route selected", "extra": {"executor": "route_triage", "selected_route": "request_more_info", "recommended_route": "request_more_info", "category": "authentication", "urgency": "medium", "sentiment": "neutral"}}
+event=executor_invoked | executor=router_executor
+event=executor_completed | executor=router_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=request_more_info_executor
+event=output | executor=request_more_info_executor
+event=executor_completed | executor=request_more_info_executor
+event=superstep_completed
+event=status
+final_status=completed
+selected_route=request_more_info
+human_review_required=False
+human_review_action=None
+approval_granted=None
+FINAL WORKFLOW RESULT
+{
+  "status": "completed",
+  "selected_route": "request_more_info",
+  "classification": {
+    "category": "authentication",
+    "urgency": "medium",
+    "sentiment": "neutral",
+    "missing_info": [
+      "steps_to_reproduce",
+      "environment",
+      "browser",
+      "device_or_os",
+      "expected_behavior"
+    ],
+    "recommended_route": "request_more_info",
+    "reasoning": "The report pertains to authentication but lacks essential details such as steps to reproduce and environment info, preventing full assessment.",
+    "confidence": 0.8
+  },
+  "human_review_required": false,
+  "human_review_action": null,
+  "approval_granted": null,
+  "final_action": "Request additional information from the bug reporter.",
+  "error": null,
+  "event_log": [
+    {
+      "status": "received",
+      "message": "Bug report received.",
+      "executor": "preprocess_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:41.957905Z"
+    },
+    {
+      "status": "preprocessed",
+      "message": "Bug report preprocessed.",
+      "executor": "preprocess_executor",
+      "data": {
+        "missing_info": [
+          "steps_to_reproduce",
+          "environment",
+          "browser",
+          "device_or_os",
+          "expected_behavior"
+        ]
+      },
+      "created_at": "2026-06-15T03:07:41.959571Z"
+    },
+    {
+      "status": "classified",
+      "message": "Bug report classified.",
+      "executor": "classifier_agent",
+      "data": {
+        "category": "authentication",
+        "urgency": "medium",
+        "sentiment": "neutral"
+      },
+      "created_at": "2026-06-15T03:07:46.535184Z"
+    },
+    {
+      "status": "routed",
+      "message": "Bug report routed.",
+      "executor": "router_executor",
+      "data": {
+        "selected_route": "request_more_info"
+      },
+      "created_at": "2026-06-15T03:07:46.586840Z"
+    },
+    {
+      "status": "completed",
+      "message": "Request additional information from the bug reporter.",
+      "executor": "request_more_info_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:46.638531Z"
+    }
+  ],
+  "created_at": "2026-06-15T03:07:46.638555Z",
+  "updated_at": "2026-06-15T03:07:46.638556Z"
+}
+DEMO VALIDATION PASSED

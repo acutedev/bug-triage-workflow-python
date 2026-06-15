@@ -1,0 +1,67 @@
+DEMO SCENARIO: classifier-failure
+event=started
+event=status
+{"timestamp": "2026-06-15T03:07:58.442234+00:00", "level": "INFO", "logger": "bug_triage_workflow.preprocess", "message": "Bug report preprocessed", "extra": {"executor": "preprocess_bug_report", "missing_info_count": 0, "extracted_field_names": ["browser", "device_or_os", "environment", "module"]}}
+event=executor_invoked | executor=preprocess_executor
+event=executor_completed | executor=preprocess_executor
+event=superstep_started
+event=executor_invoked | executor=classifier_request_executor
+event=executor_completed | executor=classifier_request_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=classifier_agent
+event=executor_completed | executor=classifier_agent
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:58.546245+00:00", "level": "ERROR", "logger": "bug_triage_workflow.classifier", "message": "Bug report classification failed validation", "extra": {"executor": "classifier_agent"}}
+event=executor_invoked | executor=classifier_response_executor
+event=output | executor=classifier_response_executor
+event=executor_completed | executor=classifier_response_executor
+event=superstep_completed
+event=status
+final_status=failed
+selected_route=None
+human_review_required=False
+human_review_action=None
+approval_granted=None
+FINAL WORKFLOW RESULT
+{
+  "status": "failed",
+  "selected_route": null,
+  "classification": null,
+  "human_review_required": false,
+  "human_review_action": null,
+  "approval_granted": null,
+  "final_action": null,
+  "error": "Bug classification failed: 7 validation errors for TriageClassification\ncategory\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nurgency\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nsentiment\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nrecommended_route\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreasoning\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nconfidence\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\ninvalid\n  Extra inputs are not permitted [type=extra_forbidden, input_value='classifier response', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+  "event_log": [
+    {
+      "status": "received",
+      "message": "Bug report received.",
+      "executor": "preprocess_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:58.441015Z"
+    },
+    {
+      "status": "preprocessed",
+      "message": "Bug report preprocessed.",
+      "executor": "preprocess_executor",
+      "data": {
+        "missing_info": []
+      },
+      "created_at": "2026-06-15T03:07:58.442322Z"
+    },
+    {
+      "status": "failed",
+      "message": "Bug classification failed: 7 validation errors for TriageClassification\ncategory\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nurgency\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nsentiment\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nrecommended_route\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nreasoning\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\nconfidence\n  Field required [type=missing, input_value={'invalid': 'classifier response'}, input_type=dict]\n    For further information visit https://errors.pydantic.dev/2.13/v/missing\ninvalid\n  Extra inputs are not permitted [type=extra_forbidden, input_value='classifier response', input_type=str]\n    For further information visit https://errors.pydantic.dev/2.13/v/extra_forbidden",
+      "executor": "classifier_response_executor",
+      "data": {
+        "error_type": "ValidationError"
+      },
+      "created_at": "2026-06-15T03:07:58.546392Z"
+    }
+  ],
+  "created_at": "2026-06-15T03:07:58.546409Z",
+  "updated_at": "2026-06-15T03:07:58.546410Z"
+}
+DEMO VALIDATION PASSED

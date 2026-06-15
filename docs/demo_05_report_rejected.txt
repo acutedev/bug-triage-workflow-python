@@ -1,0 +1,132 @@
+DEMO SCENARIO: report-rejected
+{"timestamp": "2026-06-15T03:07:52.592343+00:00", "level": "INFO", "logger": "bug_triage_workflow.openai_provider", "message": "Native classifier agent created", "extra": {"executor": "classifier_agent", "model": "gpt-4.1-mini"}}
+event=started
+event=status
+{"timestamp": "2026-06-15T03:07:52.595781+00:00", "level": "INFO", "logger": "bug_triage_workflow.preprocess", "message": "Bug report preprocessed", "extra": {"executor": "preprocess_bug_report", "missing_info_count": 1, "extracted_field_names": ["browser", "device_or_os", "environment", "module"]}}
+event=executor_invoked | executor=preprocess_executor
+event=executor_completed | executor=preprocess_executor
+event=superstep_started
+event=executor_invoked | executor=classifier_request_executor
+event=executor_completed | executor=classifier_request_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=classifier_agent
+event=executor_completed | executor=classifier_agent
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:54.520900+00:00", "level": "INFO", "logger": "bug_triage_workflow.classifier", "message": "Bug report classification completed", "extra": {"executor": "classifier_agent", "category": "security", "urgency": "critical", "sentiment": "neutral", "recommended_route": "request_human_approval", "confidence": 0.9}}
+event=executor_invoked | executor=classifier_response_executor
+event=executor_completed | executor=classifier_response_executor
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:54.572607+00:00", "level": "INFO", "logger": "bug_triage_workflow.router", "message": "Triage route selected", "extra": {"executor": "route_triage", "selected_route": "request_human_approval", "recommended_route": "request_human_approval", "category": "security", "urgency": "critical", "sentiment": "neutral"}}
+event=executor_invoked | executor=router_executor
+event=executor_completed | executor=router_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=request_human_review_executor
+event=output | executor=request_human_review_executor
+event=request_info | executor=request_human_review_executor | request_info=paused
+event=status
+event=executor_completed | executor=request_human_review_executor
+event=superstep_completed
+event=status
+request_info=resume
+event=started
+event=status
+event=superstep_started
+event=executor_invoked | executor=request_human_review_executor
+event=executor_completed | executor=request_human_review_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=log_rejection_executor
+event=output | executor=log_rejection_executor
+event=executor_completed | executor=log_rejection_executor
+event=superstep_completed
+event=status
+final_status=report_rejected
+selected_route=log_rejection
+human_review_required=True
+human_review_action=reject_report
+approval_granted=False
+FINAL WORKFLOW RESULT
+{
+  "status": "report_rejected",
+  "selected_route": "log_rejection",
+  "classification": {
+    "category": "security",
+    "urgency": "critical",
+    "sentiment": "neutral",
+    "missing_info": [
+      "actual_behavior"
+    ],
+    "recommended_route": "request_human_approval",
+    "reasoning": "The bug report indicates a security vulnerability exposing private billing data, which is critical and requires human approval before further processing. Actual behavior detail is missing but does not prevent classification as security issue.",
+    "confidence": 0.9
+  },
+  "human_review_required": true,
+  "human_review_action": "reject_report",
+  "approval_granted": false,
+  "final_action": null,
+  "error": null,
+  "event_log": [
+    {
+      "status": "received",
+      "message": "Bug report received.",
+      "executor": "preprocess_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:52.594444Z"
+    },
+    {
+      "status": "preprocessed",
+      "message": "Bug report preprocessed.",
+      "executor": "preprocess_executor",
+      "data": {
+        "missing_info": [
+          "actual_behavior"
+        ]
+      },
+      "created_at": "2026-06-15T03:07:52.595829Z"
+    },
+    {
+      "status": "classified",
+      "message": "Bug report classified.",
+      "executor": "classifier_agent",
+      "data": {
+        "category": "security",
+        "urgency": "critical",
+        "sentiment": "neutral"
+      },
+      "created_at": "2026-06-15T03:07:54.521006Z"
+    },
+    {
+      "status": "routed",
+      "message": "Bug report routed.",
+      "executor": "router_executor",
+      "data": {
+        "selected_route": "request_human_approval"
+      },
+      "created_at": "2026-06-15T03:07:54.572695Z"
+    },
+    {
+      "status": "awaiting_human_review",
+      "message": "Waiting for human review.",
+      "executor": "request_human_review_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:54.624247Z"
+    },
+    {
+      "status": "report_rejected",
+      "message": "Human reviewer rejected the report.",
+      "executor": "log_rejection_executor",
+      "data": {
+        "approver": "Demo Reviewer",
+        "human_review_action": "reject_report"
+      },
+      "created_at": "2026-06-15T03:07:54.727668Z"
+    }
+  ],
+  "created_at": "2026-06-15T03:07:54.727685Z",
+  "updated_at": "2026-06-15T03:07:54.727685Z"
+}
+DEMO VALIDATION PASSED

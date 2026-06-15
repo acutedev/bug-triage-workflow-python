@@ -1,0 +1,111 @@
+DEMO SCENARIO: direct-escalation
+{"timestamp": "2026-06-15T03:07:55.324746+00:00", "level": "INFO", "logger": "bug_triage_workflow.openai_provider", "message": "Native classifier agent created", "extra": {"executor": "classifier_agent", "model": "gpt-4.1-mini"}}
+event=started
+event=status
+{"timestamp": "2026-06-15T03:07:55.328046+00:00", "level": "INFO", "logger": "bug_triage_workflow.preprocess", "message": "Bug report preprocessed", "extra": {"executor": "preprocess_bug_report", "missing_info_count": 1, "extracted_field_names": ["browser", "device_or_os", "environment", "module"]}}
+event=executor_invoked | executor=preprocess_executor
+event=executor_completed | executor=preprocess_executor
+event=superstep_started
+event=executor_invoked | executor=classifier_request_executor
+event=executor_completed | executor=classifier_request_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=classifier_agent
+event=executor_completed | executor=classifier_agent
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:57.752933+00:00", "level": "INFO", "logger": "bug_triage_workflow.classifier", "message": "Bug report classification completed", "extra": {"executor": "classifier_agent", "category": "security", "urgency": "critical", "sentiment": "neutral", "recommended_route": "request_human_approval", "confidence": 0.95}}
+event=executor_invoked | executor=classifier_response_executor
+event=executor_completed | executor=classifier_response_executor
+event=superstep_completed
+event=superstep_started
+{"timestamp": "2026-06-15T03:07:57.804634+00:00", "level": "INFO", "logger": "bug_triage_workflow.router", "message": "Triage route selected", "extra": {"executor": "route_triage", "selected_route": "request_human_approval", "recommended_route": "request_human_approval", "category": "security", "urgency": "critical", "sentiment": "neutral"}}
+event=executor_invoked | executor=router_executor
+event=executor_completed | executor=router_executor
+event=superstep_completed
+event=superstep_started
+event=executor_invoked | executor=create_direct_escalation_ticket_executor
+event=output | executor=create_direct_escalation_ticket_executor
+event=executor_completed | executor=create_direct_escalation_ticket_executor
+event=superstep_completed
+event=status
+final_status=completed
+selected_route=create_escalation_ticket
+human_review_required=False
+human_review_action=None
+approval_granted=None
+FINAL WORKFLOW RESULT
+{
+  "status": "completed",
+  "selected_route": "create_escalation_ticket",
+  "classification": {
+    "category": "security",
+    "urgency": "critical",
+    "sentiment": "neutral",
+    "missing_info": [
+      "actual_behavior"
+    ],
+    "recommended_route": "request_human_approval",
+    "reasoning": "The bug report describes a severe security issue exposing private billing data, which is critical and requires human approval. Some behavior details are missing but the issue is clear and urgent.",
+    "confidence": 0.95
+  },
+  "human_review_required": false,
+  "human_review_action": null,
+  "approval_granted": null,
+  "final_action": "Create an escalation ticket directly because human review is disabled by configuration.",
+  "error": null,
+  "event_log": [
+    {
+      "status": "received",
+      "message": "Bug report received.",
+      "executor": "preprocess_executor",
+      "data": {},
+      "created_at": "2026-06-15T03:07:55.326705Z"
+    },
+    {
+      "status": "preprocessed",
+      "message": "Bug report preprocessed.",
+      "executor": "preprocess_executor",
+      "data": {
+        "missing_info": [
+          "actual_behavior"
+        ]
+      },
+      "created_at": "2026-06-15T03:07:55.328092Z"
+    },
+    {
+      "status": "classified",
+      "message": "Bug report classified.",
+      "executor": "classifier_agent",
+      "data": {
+        "category": "security",
+        "urgency": "critical",
+        "sentiment": "neutral"
+      },
+      "created_at": "2026-06-15T03:07:57.753033Z"
+    },
+    {
+      "status": "routed",
+      "message": "Bug report routed.",
+      "executor": "router_executor",
+      "data": {
+        "selected_route": "request_human_approval"
+      },
+      "created_at": "2026-06-15T03:07:57.804727Z"
+    },
+    {
+      "status": "completed",
+      "message": "Create an escalation ticket directly because human review is disabled by configuration.",
+      "executor": "create_direct_escalation_ticket_executor",
+      "data": {
+        "human_review_enabled": false,
+        "policy_route": "request_human_approval",
+        "effective_route": "create_escalation_ticket"
+      },
+      "created_at": "2026-06-15T03:07:57.856390Z"
+    }
+  ],
+  "created_at": "2026-06-15T03:07:57.856418Z",
+  "updated_at": "2026-06-15T03:07:57.856419Z"
+}
+DEMO VALIDATION PASSED
