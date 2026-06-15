@@ -219,6 +219,14 @@ COMPLETED_ROUTES = frozenset(
     }
 )
 
+ROUTED_ROUTES = frozenset(
+    {
+        RouteName.REQUEST_MORE_INFO,
+        RouteName.CREATE_STANDARD_TICKET,
+        RouteName.REQUEST_HUMAN_APPROVAL,
+    }
+)
+
 INTERMEDIATE_WORKFLOW_STATUSES = frozenset(
     {
         WorkflowStatus.RECEIVED,
@@ -273,6 +281,30 @@ class WorkflowResult(StrictBaseModel):
         if self.approval_granted is not None:
             raise ValueError(f"approval_granted must be None for {route.value}")
 
+    def _validate_empty_review_summary_for_status(self) -> None:
+        if self.human_review_required:
+            raise ValueError(
+                f"human_review_required must be false when status is {self.status.value}"
+            )
+        if self.human_review_action is not None:
+            raise ValueError(
+                f"human_review_action must be None when status is {self.status.value}"
+            )
+        if self.approval_granted is not None:
+            raise ValueError(
+                f"approval_granted must be None when status is {self.status.value}"
+            )
+
+    def _validate_no_route_or_classification(self) -> None:
+        if self.selected_route is not None:
+            raise ValueError(
+                f"selected_route must be None when status is {self.status.value}"
+            )
+        if self.classification is not None:
+            raise ValueError(
+                f"classification must be None when status is {self.status.value}"
+            )
+
     def _validate_review_action(
         self,
         *,
@@ -317,11 +349,12 @@ class WorkflowResult(StrictBaseModel):
 
         if (
             self.selected_route is RouteName.REQUEST_HUMAN_APPROVAL
-            and self.status is not WorkflowStatus.AWAITING_HUMAN_REVIEW
+            and self.status
+            not in {WorkflowStatus.ROUTED, WorkflowStatus.AWAITING_HUMAN_REVIEW}
         ):
             raise ValueError(
                 "selected_route request_human_approval is valid only when "
-                "status is awaiting_human_review"
+                "status is routed or awaiting_human_review"
             )
 
         if (
@@ -436,11 +469,37 @@ class WorkflowResult(StrictBaseModel):
         if self.error is not None:
             raise ValueError(f"error must be None when status is {self.status.value}")
 
-        if self.status is WorkflowStatus.CLASSIFIED:
+        if self.status in {WorkflowStatus.RECEIVED, WorkflowStatus.PREPROCESSED}:
+            self._validate_no_route_or_classification()
+            self._validate_empty_review_summary_for_status()
+        elif self.status is WorkflowStatus.CLASSIFIED:
             self._require_classification()
+            if self.selected_route is not None:
+                raise ValueError("selected_route must be None when status is classified")
+            self._validate_empty_review_summary_for_status()
         elif self.status is WorkflowStatus.ROUTED:
             self._require_classification()
             self._require_selected_route()
+            if self.selected_route not in ROUTED_ROUTES:
+                raise ValueError(
+                    f"selected_route {self.selected_route.value} is not valid "
+                    "when status is routed"
+                )
+            if self.human_review_action is not None:
+                raise ValueError("human_review_action must be None when status is routed")
+            if self.approval_granted is not None:
+                raise ValueError("approval_granted must be None when status is routed")
+            if self.selected_route is RouteName.REQUEST_HUMAN_APPROVAL:
+                if not self.human_review_required:
+                    raise ValueError(
+                        "human_review_required must be true when status is routed "
+                        "to request_human_approval"
+                    )
+            elif self.human_review_required:
+                raise ValueError(
+                    "human_review_required must be false when status is routed "
+                    f"to {self.selected_route.value}"
+                )
         elif self.status is WorkflowStatus.ESCALATION_APPROVED:
             self._require_classification()
             if self.selected_route is not RouteName.CREATE_ESCALATION_TICKET:

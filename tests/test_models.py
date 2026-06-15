@@ -296,6 +296,210 @@ def test_failed_result_can_retain_selected_route(selected_route):
     assert result.error == "Workflow execution failed after routing."
 
 
+def test_received_workflow_result_is_valid():
+    result = WorkflowResult(status=WorkflowStatus.RECEIVED)
+
+    assert result.status is WorkflowStatus.RECEIVED
+    assert result.selected_route is None
+    assert result.classification is None
+    assert result.human_review_required is False
+
+
+def test_preprocessed_workflow_result_is_valid():
+    result = WorkflowResult(status=WorkflowStatus.PREPROCESSED)
+
+    assert result.status is WorkflowStatus.PREPROCESSED
+    assert result.selected_route is None
+    assert result.classification is None
+    assert result.human_review_required is False
+
+
+def test_classified_workflow_result_is_valid():
+    classification = make_classification()
+
+    result = WorkflowResult(
+        status=WorkflowStatus.CLASSIFIED,
+        classification=classification,
+    )
+
+    assert result.status is WorkflowStatus.CLASSIFIED
+    assert result.classification == classification
+    assert result.selected_route is None
+    assert result.human_review_required is False
+
+
+@pytest.mark.parametrize(
+    "selected_route",
+    [
+        RouteName.CREATE_STANDARD_TICKET,
+        RouteName.REQUEST_MORE_INFO,
+    ],
+)
+def test_routed_non_human_review_result_is_valid(selected_route):
+    classification = make_classification(recommended_route=selected_route)
+
+    result = WorkflowResult(
+        status=WorkflowStatus.ROUTED,
+        selected_route=selected_route,
+        classification=classification,
+        human_review_required=False,
+    )
+
+    assert result.status is WorkflowStatus.ROUTED
+    assert result.selected_route is selected_route
+    assert result.classification == classification
+    assert result.human_review_required is False
+
+
+def test_routed_human_review_request_is_valid():
+    classification = make_classification(
+        recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+    )
+
+    result = WorkflowResult(
+        status=WorkflowStatus.ROUTED,
+        selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+        classification=classification,
+        human_review_required=True,
+    )
+
+    assert result.status is WorkflowStatus.ROUTED
+    assert result.selected_route is RouteName.REQUEST_HUMAN_APPROVAL
+    assert result.classification == classification
+    assert result.human_review_required is True
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("selected_route", RouteName.CREATE_STANDARD_TICKET),
+        ("classification", make_classification()),
+        ("human_review_required", True),
+    ],
+)
+def test_received_workflow_result_rejects_premature_fields(
+    field_name,
+    field_value,
+):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.RECEIVED,
+            **{field_name: field_value},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("selected_route", RouteName.CREATE_STANDARD_TICKET),
+        ("classification", make_classification()),
+    ],
+)
+def test_preprocessed_workflow_result_rejects_premature_fields(
+    field_name,
+    field_value,
+):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.PREPROCESSED,
+            **{field_name: field_value},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("selected_route", RouteName.CREATE_STANDARD_TICKET),
+        ("human_review_required", True),
+        ("human_review_action", HumanReviewAction.CREATE_STANDARD_TICKET),
+        ("approval_granted", True),
+    ],
+)
+def test_classified_workflow_result_rejects_routing_and_review_fields(
+    field_name,
+    field_value,
+):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.CLASSIFIED,
+            classification=make_classification(),
+            **{field_name: field_value},
+        )
+
+
+def test_routed_workflow_result_without_classification_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("human_review_action", HumanReviewAction.CREATE_STANDARD_TICKET),
+        ("approval_granted", True),
+    ],
+)
+def test_routed_workflow_result_rejects_review_decision_fields(
+    field_name,
+    field_value,
+):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(),
+            human_review_required=True,
+            **{field_name: field_value},
+        )
+
+
+def test_routed_human_review_request_requires_human_review_flag():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
+            human_review_required=False,
+        )
+
+
+@pytest.mark.parametrize(
+    "selected_route",
+    [
+        RouteName.CREATE_STANDARD_TICKET,
+        RouteName.REQUEST_MORE_INFO,
+    ],
+)
+def test_routed_non_human_review_routes_reject_human_review_flag(selected_route):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            selected_route=selected_route,
+            classification=make_classification(recommended_route=selected_route),
+            human_review_required=True,
+        )
+
+
+def test_routed_status_rejects_terminal_escalation_route():
+    with pytest.raises(
+        ValidationError,
+        match="selected_route create_escalation_ticket is not valid when status is routed",
+    ):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            selected_route=RouteName.CREATE_ESCALATION_TICKET,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
+            human_review_required=False,
+        )
+
+
 def test_failed_workflow_result_without_error_rejected():
     with pytest.raises(ValidationError):
         WorkflowResult(status=WorkflowStatus.FAILED)
