@@ -211,6 +211,26 @@ class WorkflowEvent(StrictBaseModel):
         return v
 
 
+COMPLETED_ROUTES = frozenset(
+    {
+        RouteName.REQUEST_MORE_INFO,
+        RouteName.CREATE_STANDARD_TICKET,
+        RouteName.CREATE_ESCALATION_TICKET,
+    }
+)
+
+INTERMEDIATE_WORKFLOW_STATUSES = frozenset(
+    {
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.ESCALATION_APPROVED,
+        WorkflowStatus.STANDARD_TICKET_SELECTED,
+    }
+)
+
+
 class WorkflowResult(StrictBaseModel):
     status: WorkflowStatus
     selected_route: RouteName | None = None
@@ -231,11 +251,45 @@ class WorkflowResult(StrictBaseModel):
             raise ValueError("optional text fields must not be blank when provided")
         return v
 
-    @model_validator(mode="after")
-    def workflow_result_fields_must_be_consistent(self) -> "WorkflowResult":
-        if self.updated_at < self.created_at:
-            raise ValueError("updated_at must be greater than or equal to created_at")
+    def _require_classification(self) -> None:
+        if self.classification is None:
+            raise ValueError(
+                f"classification is required when status is {self.status.value}"
+            )
 
+    def _require_selected_route(self) -> None:
+        if self.selected_route is None:
+            raise ValueError(
+                f"selected_route is required when status is {self.status.value}"
+            )
+
+    def _validate_no_review_summary(self, *, route: RouteName) -> None:
+        if self.human_review_required:
+            raise ValueError(
+                f"human_review_required must be false for {route.value}"
+            )
+        if self.human_review_action is not None:
+            raise ValueError(f"human_review_action must be None for {route.value}")
+        if self.approval_granted is not None:
+            raise ValueError(f"approval_granted must be None for {route.value}")
+
+    def _validate_review_action(
+        self,
+        *,
+        route: RouteName,
+        action: HumanReviewAction,
+        approval_granted: bool | None,
+    ) -> None:
+        if (
+            not self.human_review_required
+            or self.human_review_action is not action
+            or self.approval_granted is not approval_granted
+        ):
+            raise ValueError(
+                f"{route.value} route requires {action.value} human review action"
+            )
+
+    def _validate_human_review_summary(self) -> None:
         if self.human_review_action is not None and not self.human_review_required:
             raise ValueError(
                 "human_review_required must be true when human_review_action is provided"
@@ -252,125 +306,184 @@ class WorkflowResult(StrictBaseModel):
                     "approval_granted must match the human_review_action summary semantics"
                 )
 
-        if self.status == WorkflowStatus.FAILED and not self.error:
+        if self.approval_granted is not None and not self.human_review_required:
+            raise ValueError(
+                "human_review_required must be true when approval_granted is provided"
+            )
+
+    def _validate_route_ownership(self) -> None:
+        if self.status is WorkflowStatus.FAILED:
+            return
+
+        if (
+            self.selected_route is RouteName.REQUEST_HUMAN_APPROVAL
+            and self.status is not WorkflowStatus.AWAITING_HUMAN_REVIEW
+        ):
+            raise ValueError(
+                "selected_route request_human_approval is valid only when "
+                "status is awaiting_human_review"
+            )
+
+        if (
+            self.selected_route is RouteName.LOG_REJECTION
+            and self.status is not WorkflowStatus.REPORT_REJECTED
+        ):
+            raise ValueError(
+                "selected_route log_rejection is valid only when status is report_rejected"
+            )
+
+    def _validate_failed_status(self) -> None:
+        if self.status is not WorkflowStatus.FAILED:
+            return
+
+        if not self.error:
             raise ValueError("error is required when status is failed")
-
-        if self.status == WorkflowStatus.FAILED and self.final_action is not None:
+        if self.final_action is not None:
             raise ValueError("final_action must be None when status is failed")
-
-        if self.status == WorkflowStatus.FAILED and self.approval_granted is not None:
+        if self.approval_granted is not None:
             raise ValueError("approval_granted must be None when status is failed")
-
-        if self.status == WorkflowStatus.FAILED and self.human_review_action is not None:
+        if self.human_review_action is not None:
             raise ValueError("human_review_action must be None when status is failed")
 
-        if self.status == WorkflowStatus.COMPLETED and not self.final_action:
+    def _validate_completed_status(self) -> None:
+        if self.status is not WorkflowStatus.COMPLETED:
+            return
+
+        self._require_selected_route()
+        self._require_classification()
+        if not self.final_action:
             raise ValueError("final_action is required when status is completed")
-
-        if self.status == WorkflowStatus.COMPLETED and self.error is not None:
+        if self.error is not None:
             raise ValueError("error must be None when status is completed")
+        if self.selected_route not in COMPLETED_ROUTES:
+            raise ValueError(
+                f"selected_route {self.selected_route.value} is not valid "
+                "when status is completed"
+            )
 
-        if self.approval_granted is not None and not self.human_review_required:
-            raise ValueError("human_review_required must be true when approval_granted is provided")
+        if self.selected_route is RouteName.REQUEST_MORE_INFO:
+            self._validate_no_review_summary(route=RouteName.REQUEST_MORE_INFO)
+        elif self.selected_route is RouteName.CREATE_STANDARD_TICKET:
+            if self.human_review_required:
+                self._validate_review_action(
+                    route=RouteName.CREATE_STANDARD_TICKET,
+                    action=HumanReviewAction.CREATE_STANDARD_TICKET,
+                    approval_granted=None,
+                )
+            else:
+                self._validate_no_review_summary(
+                    route=RouteName.CREATE_STANDARD_TICKET
+                )
+        elif self.selected_route is RouteName.CREATE_ESCALATION_TICKET:
+            if self.human_review_required:
+                self._validate_review_action(
+                    route=RouteName.CREATE_ESCALATION_TICKET,
+                    action=HumanReviewAction.APPROVE_ESCALATION,
+                    approval_granted=True,
+                )
+            else:
+                self._validate_no_review_summary(
+                    route=RouteName.CREATE_ESCALATION_TICKET
+                )
 
-        if self.status == WorkflowStatus.AWAITING_HUMAN_REVIEW and not self.human_review_required:
+    def _validate_awaiting_human_review_status(self) -> None:
+        if self.status is not WorkflowStatus.AWAITING_HUMAN_REVIEW:
+            return
+
+        self._require_classification()
+        if not self.human_review_required:
             raise ValueError("human_review_required must be true while awaiting human review")
-
-        if self.status == WorkflowStatus.AWAITING_HUMAN_REVIEW:
-            if self.selected_route != RouteName.REQUEST_HUMAN_APPROVAL:
-                raise ValueError(
-                    "selected_route must be request_human_approval while awaiting human review"
-                )
-            if self.approval_granted is not None:
-                raise ValueError(
-                    "approval_granted must be None while awaiting human review"
-                )
-            if self.human_review_action is not None:
-                raise ValueError(
-                    "human_review_action must be None while awaiting human review"
-                )
-            if self.final_action is not None:
-                raise ValueError(
-                    "final_action must be None while awaiting human review"
-                )
-            if self.error is not None:
-                raise ValueError("error must be None while awaiting human review")
-
-        if self.status == WorkflowStatus.ESCALATION_APPROVED:
-            if (
-                not self.human_review_required
-                or self.human_review_action is not HumanReviewAction.APPROVE_ESCALATION
-                or self.approval_granted is not True
-            ):
-                raise ValueError("escalation_approved status requires escalation approval")
-
-        if self.status == WorkflowStatus.STANDARD_TICKET_SELECTED:
-            if (
-                not self.human_review_required
-                or self.human_review_action is not HumanReviewAction.CREATE_STANDARD_TICKET
-                or self.approval_granted is not None
-                or self.selected_route != RouteName.CREATE_STANDARD_TICKET
-            ):
-                raise ValueError(
-                    "standard_ticket_selected status requires standard-ticket human review action"
-                )
-            if self.final_action is not None:
-                raise ValueError("final_action must be None when status is standard_ticket_selected")
-            if self.error is not None:
-                raise ValueError("error must be None when status is standard_ticket_selected")
-
-        if self.status == WorkflowStatus.REPORT_REJECTED:
-            if (
-                not self.human_review_required
-                or self.human_review_action is not HumanReviewAction.REJECT_REPORT
-                or self.approval_granted is not False
-                or self.selected_route != RouteName.LOG_REJECTION
-            ):
-                raise ValueError("report_rejected status requires report rejection")
-            if self.final_action is not None:
-                raise ValueError("final_action must be None when status is report_rejected")
-            if self.error is not None:
-                raise ValueError("error must be None when status is report_rejected")
-
-        if (
-            self.selected_route == RouteName.CREATE_ESCALATION_TICKET
-            and self.human_review_required
-            and (
-                self.human_review_action is not HumanReviewAction.APPROVE_ESCALATION
-                or self.approval_granted is not True
-            )
-        ):
+        if self.selected_route is not RouteName.REQUEST_HUMAN_APPROVAL:
             raise ValueError(
-                "create_escalation_ticket route requires approve_escalation "
-                "when human review is required"
+                "selected_route must be request_human_approval while awaiting human review"
             )
-
-        if (
-            self.selected_route == RouteName.CREATE_STANDARD_TICKET
-            and self.human_review_required
-            and (
-                self.human_review_action is not HumanReviewAction.CREATE_STANDARD_TICKET
-                or self.approval_granted is not None
-            )
-        ):
+        if self.approval_granted is not None:
+            raise ValueError("approval_granted must be None while awaiting human review")
+        if self.human_review_action is not None:
             raise ValueError(
-                "create_standard_ticket route requires create_standard_ticket "
-                "when human review is required"
+                "human_review_action must be None while awaiting human review"
             )
+        if self.final_action is not None:
+            raise ValueError("final_action must be None while awaiting human review")
+        if self.error is not None:
+            raise ValueError("error must be None while awaiting human review")
 
+    def _validate_report_rejected_status(self) -> None:
+        if self.status is not WorkflowStatus.REPORT_REJECTED:
+            return
+
+        self._require_classification()
         if (
-            self.selected_route == RouteName.LOG_REJECTION
-            and (
-                not self.human_review_required
-                or self.human_review_action is not HumanReviewAction.REJECT_REPORT
-                or self.approval_granted is not False
-            )
+            not self.human_review_required
+            or self.human_review_action is not HumanReviewAction.REJECT_REPORT
+            or self.approval_granted is not False
+            or self.selected_route is not RouteName.LOG_REJECTION
         ):
-            raise ValueError("log_rejection route requires reject_report human review action")
+            raise ValueError("report_rejected status requires report rejection")
+        if self.final_action is not None:
+            raise ValueError("final_action must be None when status is report_rejected")
+        if self.error is not None:
+            raise ValueError("error must be None when status is report_rejected")
 
-        if self.event_log and self.event_log[-1].status != self.status:
+    def _validate_intermediate_status(self) -> None:
+        if self.status not in INTERMEDIATE_WORKFLOW_STATUSES:
+            return
+
+        if self.final_action is not None:
+            raise ValueError(
+                f"final_action must be None when status is {self.status.value}"
+            )
+        if self.error is not None:
+            raise ValueError(f"error must be None when status is {self.status.value}")
+
+        if self.status is WorkflowStatus.CLASSIFIED:
+            self._require_classification()
+        elif self.status is WorkflowStatus.ROUTED:
+            self._require_classification()
+            self._require_selected_route()
+        elif self.status is WorkflowStatus.ESCALATION_APPROVED:
+            self._require_classification()
+            if self.selected_route is not RouteName.CREATE_ESCALATION_TICKET:
+                raise ValueError(
+                    "selected_route must be create_escalation_ticket when "
+                    "status is escalation_approved"
+                )
+            self._validate_review_action(
+                route=RouteName.CREATE_ESCALATION_TICKET,
+                action=HumanReviewAction.APPROVE_ESCALATION,
+                approval_granted=True,
+            )
+        elif self.status is WorkflowStatus.STANDARD_TICKET_SELECTED:
+            self._require_classification()
+            if self.selected_route is not RouteName.CREATE_STANDARD_TICKET:
+                raise ValueError(
+                    "selected_route must be create_standard_ticket when "
+                    "status is standard_ticket_selected"
+                )
+            self._validate_review_action(
+                route=RouteName.CREATE_STANDARD_TICKET,
+                action=HumanReviewAction.CREATE_STANDARD_TICKET,
+                approval_granted=None,
+            )
+
+    def _validate_final_event_status(self) -> None:
+        if self.event_log and self.event_log[-1].status is not self.status:
             raise ValueError(
                 "the final workflow event status must match the workflow result status"
             )
+
+    @model_validator(mode="after")
+    def workflow_result_fields_must_be_consistent(self) -> "WorkflowResult":
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at must be greater than or equal to created_at")
+
+        self._validate_human_review_summary()
+        self._validate_route_ownership()
+        self._validate_failed_status()
+        self._validate_completed_status()
+        self._validate_awaiting_human_review_status()
+        self._validate_report_rejected_status()
+        self._validate_intermediate_status()
+        self._validate_final_event_status()
 
         return self

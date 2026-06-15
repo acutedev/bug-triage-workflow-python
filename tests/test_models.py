@@ -22,6 +22,21 @@ from src.models import (
 )
 
 
+def make_classification(
+    *,
+    recommended_route: RouteName = RouteName.CREATE_STANDARD_TICKET,
+) -> TriageClassification:
+    return TriageClassification(
+        category=BugCategory.UI_BUG,
+        urgency=Urgency.MEDIUM,
+        sentiment=Sentiment.NEUTRAL,
+        missing_info=[],
+        recommended_route=recommended_route,
+        reasoning="Validated classification for workflow result testing.",
+        confidence=0.9,
+    )
+
+
 # BugReportInput tests
 
 
@@ -244,6 +259,43 @@ def test_workflow_result_without_selected_route_when_failed():
     assert result.error == "validation failure"
 
 
+def test_failed_preprocessing_result_is_valid():
+    result = WorkflowResult(
+        status=WorkflowStatus.FAILED,
+        selected_route=None,
+        classification=None,
+        human_review_required=False,
+        human_review_action=None,
+        approval_granted=None,
+        final_action=None,
+        error="Bug preprocessing failed: raw_text must not be empty",
+    )
+
+    assert result.status == WorkflowStatus.FAILED
+    assert result.error == "Bug preprocessing failed: raw_text must not be empty"
+    assert result.selected_route is None
+    assert result.classification is None
+
+
+@pytest.mark.parametrize(
+    "selected_route",
+    [
+        RouteName.REQUEST_HUMAN_APPROVAL,
+        RouteName.LOG_REJECTION,
+    ],
+)
+def test_failed_result_can_retain_selected_route(selected_route):
+    result = WorkflowResult(
+        status=WorkflowStatus.FAILED,
+        selected_route=selected_route,
+        error="Workflow execution failed after routing.",
+    )
+
+    assert result.status is WorkflowStatus.FAILED
+    assert result.selected_route is selected_route
+    assert result.error == "Workflow execution failed after routing."
+
+
 def test_failed_workflow_result_without_error_rejected():
     with pytest.raises(ValidationError):
         WorkflowResult(status=WorkflowStatus.FAILED)
@@ -275,13 +327,18 @@ def test_failed_workflow_result_with_approval_granted_rejected():
 
 def test_completed_workflow_result_requires_final_action():
     with pytest.raises(ValidationError):
-        WorkflowResult(status=WorkflowStatus.COMPLETED)
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(),
+        )
 
 
 def test_completed_workflow_result_with_final_action_is_valid():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_STANDARD_TICKET,
+        classification=make_classification(),
         final_action="Created standard bug ticket.",
     )
     assert result.status == WorkflowStatus.COMPLETED
@@ -293,8 +350,110 @@ def test_completed_workflow_result_with_error_rejected():
         WorkflowResult(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(),
             final_action="Created standard bug ticket.",
             error="unexpected error",
+        )
+
+
+def test_completed_workflow_result_without_selected_route_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            classification=make_classification(),
+            final_action="Created standard bug ticket.",
+        )
+
+
+def test_completed_workflow_result_without_classification_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            final_action="Created standard bug ticket.",
+        )
+
+
+@pytest.mark.parametrize(
+    "selected_route",
+    [
+        RouteName.REQUEST_HUMAN_APPROVAL,
+        RouteName.LOG_REJECTION,
+    ],
+)
+def test_completed_workflow_result_rejects_non_final_routes(selected_route):
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=selected_route,
+            classification=make_classification(),
+            final_action="Created standard bug ticket.",
+        )
+
+
+def test_completed_request_more_info_rejects_human_review_enabled():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.REQUEST_MORE_INFO,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_MORE_INFO
+            ),
+            human_review_required=True,
+            final_action="Request additional information from the bug reporter.",
+        )
+
+
+def test_received_workflow_result_with_error_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.RECEIVED,
+            error="unexpected error",
+        )
+
+
+def test_routed_workflow_result_with_final_action_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(),
+            final_action="Create a standard bug ticket.",
+        )
+
+
+def test_classified_workflow_result_without_classification_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(status=WorkflowStatus.CLASSIFIED)
+
+
+def test_routed_workflow_result_without_route_rejected():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.ROUTED,
+            classification=make_classification(),
+        )
+
+
+def test_request_human_approval_route_requires_awaiting_status():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.CLASSIFIED,
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
+        )
+
+
+def test_log_rejection_route_requires_report_rejected_status():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.CLASSIFIED,
+            selected_route=RouteName.LOG_REJECTION,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
         )
 
 
@@ -305,6 +464,7 @@ def test_workflow_result_updated_at_cannot_be_before_created_at():
         WorkflowResult(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(),
             final_action="Created standard bug ticket.",
             created_at=created_at,
             updated_at=created_at - timedelta(seconds=1),
@@ -346,6 +506,7 @@ def test_workflow_result_event_log_uses_workflow_events():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_STANDARD_TICKET,
+        classification=make_classification(),
         final_action="Created standard bug ticket.",
         event_log=[
             WorkflowEvent(
@@ -364,6 +525,7 @@ def test_workflow_result_final_event_status_must_match_result_status():
         WorkflowResult(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(),
             final_action="Created standard bug ticket.",
             event_log=[
                 WorkflowEvent(
@@ -379,6 +541,7 @@ def test_workflow_result_empty_event_log_is_still_valid():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_STANDARD_TICKET,
+        classification=make_classification(),
         final_action="Created standard bug ticket.",
         event_log=[],
     )
@@ -455,10 +618,22 @@ def test_awaiting_human_review_requires_human_review_flag():
         WorkflowResult(status=WorkflowStatus.AWAITING_HUMAN_REVIEW)
 
 
+def test_awaiting_human_review_requires_classification():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.AWAITING_HUMAN_REVIEW,
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            human_review_required=True,
+        )
+
+
 def test_awaiting_human_review_with_flag_is_valid():
     result = WorkflowResult(
         status=WorkflowStatus.AWAITING_HUMAN_REVIEW,
         selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+        classification=make_classification(
+            recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+        ),
         human_review_required=True,
     )
     assert result.status == WorkflowStatus.AWAITING_HUMAN_REVIEW
@@ -483,6 +658,9 @@ def test_awaiting_human_review_rejects_terminal_fields(
         WorkflowResult(
             status=WorkflowStatus.AWAITING_HUMAN_REVIEW,
             selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             **{field_name: field_value},
         )
@@ -519,7 +697,8 @@ def test_human_review_action_must_match_approval_summary(
     with pytest.raises(ValidationError):
         WorkflowResult(
             status=WorkflowStatus.ROUTED,
-            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(),
             human_review_required=True,
             human_review_action=action,
             approval_granted=approval_granted,
@@ -529,7 +708,10 @@ def test_human_review_action_must_match_approval_summary(
 def test_escalation_approved_status_requires_escalation_review_action():
     result = WorkflowResult(
         status=WorkflowStatus.ESCALATION_APPROVED,
-        selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+        selected_route=RouteName.CREATE_ESCALATION_TICKET,
+        classification=make_classification(
+            recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+        ),
         human_review_required=True,
         human_review_action=HumanReviewAction.APPROVE_ESCALATION,
         approval_granted=True,
@@ -543,7 +725,10 @@ def test_escalation_approved_status_without_escalation_action_rejected():
     with pytest.raises(ValidationError):
         WorkflowResult(
             status=WorkflowStatus.ESCALATION_APPROVED,
-            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            selected_route=RouteName.CREATE_ESCALATION_TICKET,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             approval_granted=True,
         )
@@ -553,6 +738,9 @@ def test_standard_ticket_selected_status_requires_standard_ticket_action():
     result = WorkflowResult(
         status=WorkflowStatus.STANDARD_TICKET_SELECTED,
         selected_route=RouteName.CREATE_STANDARD_TICKET,
+        classification=make_classification(
+            recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+        ),
         human_review_required=True,
         human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
         approval_granted=None,
@@ -574,6 +762,9 @@ def test_standard_ticket_selected_status_rejects_terminal_fields(field_name, fie
         WorkflowResult(
             status=WorkflowStatus.STANDARD_TICKET_SELECTED,
             selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
             **{field_name: field_value},
@@ -584,6 +775,9 @@ def test_report_rejected_status_requires_reject_report_action():
     result = WorkflowResult(
         status=WorkflowStatus.REPORT_REJECTED,
         selected_route=RouteName.LOG_REJECTION,
+        classification=make_classification(
+            recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+        ),
         human_review_required=True,
         human_review_action=HumanReviewAction.REJECT_REPORT,
         approval_granted=False,
@@ -591,6 +785,17 @@ def test_report_rejected_status_requires_reject_report_action():
     assert result.status == WorkflowStatus.REPORT_REJECTED
     assert result.human_review_action == HumanReviewAction.REJECT_REPORT
     assert result.approval_granted is False
+
+
+def test_report_rejected_status_requires_classification():
+    with pytest.raises(ValidationError):
+        WorkflowResult(
+            status=WorkflowStatus.REPORT_REJECTED,
+            selected_route=RouteName.LOG_REJECTION,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.REJECT_REPORT,
+            approval_granted=False,
+        )
 
 
 @pytest.mark.parametrize(
@@ -605,6 +810,9 @@ def test_report_rejected_status_rejects_terminal_fields(field_name, field_value)
         WorkflowResult(
             status=WorkflowStatus.REPORT_REJECTED,
             selected_route=RouteName.LOG_REJECTION,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             human_review_action=HumanReviewAction.REJECT_REPORT,
             approval_granted=False,
@@ -617,6 +825,9 @@ def test_report_rejected_status_with_granted_approval_rejected():
         WorkflowResult(
             status=WorkflowStatus.REPORT_REJECTED,
             selected_route=RouteName.LOG_REJECTION,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             human_review_action=HumanReviewAction.REJECT_REPORT,
             approval_granted=True,
@@ -628,6 +839,9 @@ def test_escalation_ticket_route_requires_escalation_review_action():
         WorkflowResult(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_ESCALATION_TICKET,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             human_review_action=HumanReviewAction.REJECT_REPORT,
             approval_granted=False,
@@ -639,6 +853,9 @@ def test_escalation_ticket_route_with_escalation_action_is_valid():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_ESCALATION_TICKET,
+        classification=make_classification(
+            recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+        ),
         human_review_required=True,
         human_review_action=HumanReviewAction.APPROVE_ESCALATION,
         approval_granted=True,
@@ -653,6 +870,9 @@ def test_standard_ticket_route_after_review_is_valid():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_STANDARD_TICKET,
+        classification=make_classification(
+            recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+        ),
         human_review_required=True,
         human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
         approval_granted=None,
@@ -668,6 +888,9 @@ def test_standard_ticket_route_after_review_rejects_escalation_action():
         WorkflowResult(
             status=WorkflowStatus.COMPLETED,
             selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             human_review_action=HumanReviewAction.APPROVE_ESCALATION,
             approval_granted=True,
@@ -680,6 +903,9 @@ def test_log_rejection_route_requires_reject_report_action():
         WorkflowResult(
             status=WorkflowStatus.REPORT_REJECTED,
             selected_route=RouteName.LOG_REJECTION,
+            classification=make_classification(
+                recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+            ),
             human_review_required=True,
             human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
             approval_granted=None,
@@ -690,6 +916,9 @@ def test_direct_escalation_without_required_approval_is_valid():
     result = WorkflowResult(
         status=WorkflowStatus.COMPLETED,
         selected_route=RouteName.CREATE_ESCALATION_TICKET,
+        classification=make_classification(
+            recommended_route=RouteName.REQUEST_HUMAN_APPROVAL
+        ),
         human_review_required=False,
         human_review_action=None,
         approval_granted=None,
