@@ -159,6 +159,51 @@ def workflow_statuses(result: WorkflowResult) -> list[WorkflowStatus]:
     return [event.status for event in result.event_log]
 
 
+def completed_executor_ids(events: list[object]) -> list[str]:
+    return [
+        event.executor_id
+        for event in events
+        if getattr(event, "type", None) == "executor_completed"
+    ]
+
+
+def workflow_result_event_indices(events: list[object]) -> list[int]:
+    return [
+        index
+        for index, event in enumerate(events)
+        if isinstance(getattr(event, "data", None), WorkflowResult)
+    ]
+
+
+def completed_executor_event_index(events: list[object], executor_id: str) -> int:
+    for index, event in enumerate(events):
+        if (
+            getattr(event, "type", None) == "executor_completed"
+            and event.executor_id == executor_id
+        ):
+            return index
+
+    raise AssertionError(f"{executor_id} did not complete")
+
+
+def assert_ordered_subsequence(
+    expected_executor_ids: list[str],
+    actual_executor_ids: list[str],
+) -> None:
+    actual_index = 0
+    for expected_executor_id in expected_executor_ids:
+        while (
+            actual_index < len(actual_executor_ids)
+            and actual_executor_ids[actual_index] != expected_executor_id
+        ):
+            actual_index += 1
+
+        assert actual_index < len(actual_executor_ids), (
+            f"{expected_executor_id} did not appear after the previous executor"
+        )
+        actual_index += 1
+
+
 def event_executor_ids(events: list[object]) -> set[str]:
     return {
         executor_id
@@ -354,16 +399,36 @@ def test_human_review_approved_creates_escalation_ticket():
         run_human_review_scenario(HumanReviewAction.APPROVE_ESCALATION)
     )
 
-    waiting_result = next(
-        event.data
-        for event in initial_events
-        if isinstance(getattr(event, "data", None), WorkflowResult)
-    )
-    final_result = next(
-        event.data
+    request_info_indices = [
+        index
+        for index, event in enumerate(initial_events)
+        if getattr(event, "type", None) == "request_info"
+    ]
+    assert len(request_info_indices) == 1
+
+    waiting_result_indices = workflow_result_event_indices(initial_events)
+    assert len(waiting_result_indices) == 1
+    assert waiting_result_indices[0] < request_info_indices[0]
+
+    waiting_result = initial_events[waiting_result_indices[0]].data
+
+    initial_completed_executors = completed_executor_ids(initial_events)
+    assert "create_escalation_ticket_executor" not in initial_completed_executors
+    assert "create_standard_ticket_executor" not in initial_completed_executors
+    assert "log_rejection_executor" not in initial_completed_executors
+    initial_executor_ids = event_executor_ids(initial_events)
+    assert "create_escalation_ticket_executor" not in initial_executor_ids
+    assert "create_standard_ticket_executor" not in initial_executor_ids
+    assert "log_rejection_executor" not in initial_executor_ids
+
+    assert all(
+        getattr(event, "type", None) != "request_info"
         for event in resumed_events
-        if isinstance(getattr(event, "data", None), WorkflowResult)
     )
+
+    final_result_indices = workflow_result_event_indices(resumed_events)
+    assert len(final_result_indices) == 1
+    final_result = resumed_events[final_result_indices[0]].data
 
     print_workflow_result("awaiting human review", waiting_result)
     print_workflow_result("escalation approved human review", final_result)
@@ -383,6 +448,10 @@ def test_human_review_approved_creates_escalation_ticket():
     assert final_result.final_action == (
         "Create an escalation ticket for human-reviewed handling."
     )
+    resumed_completed_executors = completed_executor_ids(resumed_events)
+    assert resumed_completed_executors.count("create_escalation_ticket_executor") == 1
+    assert "create_standard_ticket_executor" not in resumed_completed_executors
+    assert "log_rejection_executor" not in resumed_completed_executors
     resumed_executor_ids = event_executor_ids(resumed_events)
     assert "create_escalation_ticket_executor" in resumed_executor_ids
     assert "create_standard_ticket_executor" not in resumed_executor_ids
@@ -774,25 +843,36 @@ def test_workflow_stream_emits_final_workflow_result():
 
     events = asyncio.run(collect_events())
 
-    print("\n=== raw MAF stream events ===")
-    for event in events:
-        source_executor_id = (
-            event.source_executor_id
-            if event.type == "request_info"
-            else None
-        )
-        print(
-            f"{event.type} | "
-            f"{source_executor_id} | "
-            f"{getattr(event, 'data', None)}"
-        )
-
     assert events
+    assert_ordered_subsequence(
+        [
+            "preprocess_executor",
+            "classifier_request_executor",
+            "classifier_agent",
+            "classifier_response_executor",
+            "router_executor",
+            "create_standard_ticket_executor",
+        ],
+        completed_executor_ids(events),
+    )
+
     workflow_results = workflow_results_from_events(events)
     assert len(workflow_results) == 1
     final_result = workflow_results[0]
     assert final_result.status == WorkflowStatus.COMPLETED
+    assert final_result.selected_route == RouteName.CREATE_STANDARD_TICKET
     assert final_result.event_log[-1].status == WorkflowStatus.COMPLETED
+
+    final_result_indices = workflow_result_event_indices(events)
+    assert len(final_result_indices) == 1
+    final_result_index = final_result_indices[0]
+    for executor_id in [
+        "preprocess_executor",
+        "classifier_agent",
+        "classifier_response_executor",
+        "router_executor",
+    ]:
+        assert completed_executor_event_index(events, executor_id) < final_result_index
 
 
 def test_separate_run_calls_do_not_share_trace_events():
