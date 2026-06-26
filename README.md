@@ -47,7 +47,7 @@ Key technologies:
 - CLI demonstration in `src/main.py`.
 - Validated scenario runner with automatic outcome checks in `scripts/run_demo_scenario.py`.
 - Automated tests using fakes, stubs, mocks, and deterministic responses.
-- Nine validated demo scenario outputs in `docs/`.
+- Ten validated demo scenario outputs in `docs/`.
 - Adversarial evaluation for prompt-injection and benign-content robustness, with verified live-eval results.
 
 ## Architecture
@@ -67,7 +67,7 @@ The implementation is split into small modules with clear responsibilities and f
 - `src/workflow_trace.py` maintains the per-run workflow event trace.
 - `src/logging_config.py` configures JSON logging.
 - `src/main.py` provides the sample CLI demo.
-- `scripts/run_demo_scenario.py` runs and validates the nine demo scenarios.
+- `scripts/run_demo_scenario.py` runs and validates the ten demo scenarios.
 
 Main data flow:
 
@@ -95,7 +95,7 @@ flowchart TB
     preprocess_engine["Preprocessing Engine<br/>preprocess_executor"]
     classifier_request_engine["Classifier Request Engine<br/>classifier_request_executor"]
     classifier_response_engine["Classification Validation Engine<br/>classifier_response_executor"]
-    routing_engine["Routing Policy Engine<br/>router_executor"]
+    routing_engine["Routing Policy Engine<br/>risk / missing info / confidence<br/>router_executor"]
     review_engine["Human Review Engine<br/>request_human_review_executor"]
     terminal_engines["Terminal Action Engines<br/>more info / standard / escalation / rejection"]
     state_engine["State Validation Engine<br/>WorkflowResult and Pydantic"]
@@ -163,7 +163,7 @@ This structure supports the following IDesign goals:
 - **No tunneling:** engines do not reach through unrelated layers to call external resources; the workflow manager coordinates the business flow explicitly.
 - **Deterministic policy ownership:** the LLM classifies and recommends, while auditable Python policy selects the route.
 - **Context-aware design:** the project keeps these boundaries in one deployable process because separate network services would add unnecessary complexity for the assignment scope.
-- **Realization and validation:** the automated tests and nine validated demo scenarios realize the significant user stories and verify each route, review decision, state transition, and expected failure path.
+- **Realization and validation:** the automated tests and ten validated demo scenarios realize the significant user stories and verify each route, review decision, state transition, and expected failure path.
 
 The current implementation therefore follows IDesign as a logical component architecture. It does not claim to be a complete production HLD with independently deployed services, durable resources, or production accessors.
 
@@ -173,7 +173,7 @@ The route names are defined by `RouteName`:
 
 - `request_more_info`: the report does not contain enough useful detail, so the workflow asks for clarification.
 - `create_standard_ticket`: the report is complete enough for standard-ticket handling.
-- `request_human_approval`: the report is risky enough to require human review before final handling.
+- `request_human_approval`: the report is risky or the classifier confidence is below the review threshold, so human review is required before final handling.
 - `create_escalation_ticket`: escalation-ticket handling was selected.
 - `log_rejection`: a human reviewer rejected the report.
 
@@ -183,22 +183,39 @@ There are three related routing concepts:
 - Deterministic policy route: the route selected by `route_triage`.
 - Effective final route: the terminal route recorded in the final `WorkflowResult`.
 
-The deterministic router can override the classifier recommendation. Risky
-security, data-loss, critical, or high-emotion/high-urgency reports route to
-`request_human_approval`. Missing information routes to `request_more_info`.
-Complete non-risky reports route to `create_standard_ticket`.
+The deterministic router can override the classifier recommendation. Routing
+precedence is applied in the following order:
+
+1. Risky security, data-loss, critical, or high-emotion/high-urgency reports
+   route to `request_human_approval`.
+2. Missing information routes to `request_more_info`.
+3. A classifier confidence score below `LOW_CONFIDENCE_HUMAN_REVIEW_THRESHOLD`
+   (0.70) routes to `request_human_approval`. A score of exactly 0.70 is not
+   considered low confidence and does not trigger this rule.
+4. All remaining reports route to `create_standard_ticket`.
+
+Classifier confidence is an explicit deterministic routing signal: `route_triage`
+reads `TriageClassification.confidence` directly. This is not a claim that
+model confidence is perfectly calibrated or that the threshold is
+production-validated; it is a policy gate that routes uncertain classifications
+to a human reviewer.
 
 When human review is disabled, a policy route of `request_human_approval` is
-handled by `create_direct_escalation_ticket_executor`. In that case, the routed
-event can preserve the policy route while the final result records the
+handled by `create_direct_escalation_ticket_executor` regardless of what
+triggered that route — including low-confidence cases. In that case, the
+routed event can preserve the policy route while the final result records the
 effective route `create_escalation_ticket`.
 
 ```mermaid
 flowchart TD
-  recommendation["classifier recommendation"] --> router["router-selected policy route"]
-  router --> more_info["request_more_info"]
-  router --> standard["create_standard_ticket"]
-  router --> approval["request_human_approval"]
+  recommendation["classifier recommendation"] --> risk{"Risky category / urgency / sentiment?"}
+  risk -->|"yes"| approval["policy route: request_human_approval"]
+  risk -->|"no"| missing{"Missing information?"}
+  missing -->|"yes"| more_info["policy route: request_more_info"]
+  missing -->|"no"| confidence{"confidence < 0.70?"}
+  confidence -->|"yes"| approval
+  confidence -->|"no"| standard["policy route: create_standard_ticket"]
+
   more_info --> effective_more["effective route: request_more_info"]
   standard --> effective_standard["effective route: create_standard_ticket"]
   approval --> enabled{"HUMAN_APPROVAL_ENABLED"}
@@ -332,7 +349,8 @@ tracebacks for expected operational errors.
 │   ├── demo_06_direct_escalation_review_disabled.txt
 │   ├── demo_07_classifier_output_failure.txt
 │   ├── demo_08_adversarial_security.txt
-│   └── demo_09_adversarial_benign_quote.txt
+│   ├── demo_09_adversarial_benign_quote.txt
+│   └── demo_10_low_confidence_review.txt
 ├── pytest.ini
 ├── requirements.txt
 ├── scripts/
@@ -447,13 +465,14 @@ python -m pytest
 Current verified result:
 
 ```text
-266 passed, 6 skipped
+283 passed, 6 skipped
 ```
 
 The automated tests use fakes, stubs, mocks, and deterministic responses. The
 default suite does not call OpenAI, which keeps it fast, repeatable,
 inexpensive, and safe for CI. Real OpenAI behavior is demonstrated through the
-demo outputs in `docs/`.
+OpenAI-backed demo outputs and opt-in live evaluations; deterministic scenarios
+cover controlled failure and low-confidence paths.
 
 ### Live Adversarial Evaluations
 
@@ -501,11 +520,15 @@ Supported scenario names:
 - `classifier-failure`
 - `adversarial-security`
 - `adversarial-benign-quote`
+- `low-confidence-review`
 
 Scenarios `standard-ticket` through `direct-escalation` and both
 `adversarial-*` scenarios use the configured real OpenAI-backed classifier.
-`classifier-failure` uses a deterministic fake malformed classifier response
-and does not call OpenAI.
+`classifier-failure` and `low-confidence-review` use deterministic fake
+classifier responses and do not call OpenAI. The `low-confidence-review`
+scenario emits a complete, safe UI_BUG classification with confidence 0.60,
+which routes the report to human review; the demo reviewer selects
+`CREATE_STANDARD_TICKET`.
 
 Each successful scenario prints:
 
@@ -534,6 +557,7 @@ Rerunning a command with the same `tee` target overwrites the file unless
 - [docs/demo_07_classifier_output_failure.txt](docs/demo_07_classifier_output_failure.txt): malformed classifier output becomes a structured failed result.
 - [docs/demo_08_adversarial_security.txt](docs/demo_08_adversarial_security.txt): adversarial report embedding prompt-injection instructions is correctly classified as a security issue and routed for human approval.
 - [docs/demo_09_adversarial_benign_quote.txt](docs/demo_09_adversarial_benign_quote.txt): benign report quoting adversarial-style text is correctly classified as a UI bug and routed to a standard ticket.
+- [docs/demo_10_low_confidence_review.txt](docs/demo_10_low_confidence_review.txt): deterministic fake classifier emits a complete UI_BUG classification with confidence 0.60, triggering the low-confidence human-review route; the reviewer selects standard-ticket handling. Does not call OpenAI.
 
 ## Logging
 
@@ -721,8 +745,8 @@ Product integration:
 
 Repository evidence supports the following:
 
-- Nine demo scenarios were validated, including two adversarial scenarios.
-- The full deterministic automated suite passed with `266 passed, 6 skipped`.
+- Ten demo scenarios were validated, including two adversarial scenarios and one deterministic low-confidence-review scenario.
+- The full deterministic automated suite passed with `283 passed, 6 skipped`.
 - Live adversarial evaluations passed with `6 passed` using `gpt-4.1-mini`.
 - Source, scripts, and test compilation succeeded.
 - `.env` is not tracked.
