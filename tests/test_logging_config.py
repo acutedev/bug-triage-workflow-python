@@ -323,6 +323,34 @@ def test_invalid_path_falls_back_to_null_handler(isolated_application_logger):
     assert isinstance(diag_logger.handlers[0], logging.NullHandler)
 
 
+def test_parent_is_file_falls_back_to_null_handler(
+    isolated_application_logger, tmp_path, monkeypatch
+):
+    """Parent path that is a regular file (not a directory) must install NullHandler."""
+    import io
+
+    # Create a regular file where the parent directory would be.
+    fake_parent = tmp_path / "not_a_dir"
+    fake_parent.write_text("i am a file")
+    diag_path = fake_parent / "diag.log"
+
+    stderr_buf = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", stderr_buf)
+
+    diag_logger = configure_diagnostic_logging(path=diag_path)
+
+    assert len(diag_logger.handlers) == 1
+    assert isinstance(diag_logger.handlers[0], logging.NullHandler)
+    assert not diag_path.exists()
+    assert "--- Logging error ---" not in stderr_buf.getvalue()
+
+    # A later call with a valid path must replace the NullHandler.
+    valid_path = tmp_path / "diag.log"
+    configure_diagnostic_logging(path=valid_path)
+    assert len(diag_logger.handlers) == 1
+    assert isinstance(diag_logger.handlers[0], logging.FileHandler)
+
+
 def test_fallback_logger_does_not_emit_to_console(
     isolated_application_logger, monkeypatch
 ):
@@ -389,3 +417,92 @@ def test_preexisting_0644_diagnostic_file_hardened_to_0600(
     mode = stat.S_IMODE(os.stat(diag_path).st_mode)
     assert mode == 0o600, f"Expected 0600, got {oct(mode)}"
     assert diag_path.read_text().__contains__("probe record")
+
+
+# ---------------------------------------------------------------------------
+# Regression: sticky NullHandler fallback (defect 1)
+# ---------------------------------------------------------------------------
+
+
+def test_null_handler_replaced_when_valid_path_provided_later(
+    isolated_application_logger, tmp_path
+):
+    """NullHandler installed for an invalid path must be replaced on a later valid call."""
+    configure_diagnostic_logging(path="/nonexistent/no/such/dir/diag.log")
+    diag_logger = logging.getLogger(DIAGNOSTIC_LOGGER_NAME)
+    assert isinstance(diag_logger.handlers[0], logging.NullHandler)
+
+    diag_path = tmp_path / "diag.log"
+    configure_diagnostic_logging(path=diag_path)
+
+    assert len(diag_logger.handlers) == 1
+    assert not isinstance(diag_logger.handlers[0], logging.NullHandler)
+    assert isinstance(diag_logger.handlers[0], logging.FileHandler)
+    assert diag_logger.propagate is False
+
+
+def test_valid_handler_remains_idempotent_on_repeated_configure(
+    isolated_application_logger, tmp_path
+):
+    """A real file handler must not be duplicated by a second valid configure call."""
+    diag_path = tmp_path / "diag.log"
+    configure_diagnostic_logging(path=diag_path)
+    configure_diagnostic_logging(path=diag_path)
+
+    diag_logger = logging.getLogger(DIAGNOSTIC_LOGGER_NAME)
+    assert len(diag_logger.handlers) == 1
+    assert isinstance(diag_logger.handlers[0], logging.FileHandler)
+
+
+# ---------------------------------------------------------------------------
+# Regression: premature diagnostic-file creation (defect 2)
+# ---------------------------------------------------------------------------
+
+
+def test_handler_does_not_create_file_before_first_emit(
+    isolated_application_logger, tmp_path
+):
+    """Installing the handler must not create the diagnostic file."""
+    diag_path = tmp_path / "diag.log"
+    configure_diagnostic_logging(path=diag_path)
+
+    assert not diag_path.exists(), "Diagnostic file must not be created before first emit"
+
+
+def test_first_emit_creates_file_with_mode_0600(
+    isolated_application_logger, tmp_path
+):
+    """First log record must create the file; it must have mode 0600."""
+    import os
+
+    diag_path = tmp_path / "diag.log"
+    configure_diagnostic_logging(path=diag_path)
+
+    assert not diag_path.exists()
+    logging.getLogger(DIAGNOSTIC_LOGGER_NAME).debug("first record")
+    assert diag_path.exists()
+    assert oct(os.stat(diag_path).st_mode & 0o777) == oct(0o600)
+
+
+def test_invalid_delayed_path_nonfatal_and_no_stderr_output(
+    isolated_application_logger, tmp_path, monkeypatch
+):
+    """A delayed open failure at emit time must not write to stderr."""
+    import io
+
+    diag_dir = tmp_path / "subdir"
+    diag_dir.mkdir()
+    diag_path = diag_dir / "diag.log"
+    configure_diagnostic_logging(path=diag_path)
+
+    # Remove the directory so the delayed open fails at emit time.
+    diag_dir.rmdir()
+
+    stderr_buf = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", stderr_buf)
+
+    logging.getLogger(DIAGNOSTIC_LOGGER_NAME).debug("probe")
+
+    stderr_out = stderr_buf.getvalue()
+    assert "--- Logging error ---" not in stderr_out
+    assert "Traceback" not in stderr_out

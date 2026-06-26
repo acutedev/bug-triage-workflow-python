@@ -166,8 +166,8 @@ cat examples/security_bug.txt | python -m src.main
 
 | Gate | Command | CI | Current evidence |
 |---|---|---|---|
-| Deterministic test suite | `python -m pytest` | Yes | 332 passed, 6 skipped |
-| Focused CLI/logging tests | `python -m pytest tests/test_main.py tests/test_logging_config.py -v` | No | 41 passed |
+| Deterministic test suite | `python -m pytest` | Yes | 339 passed, 6 skipped |
+| Focused CLI/logging tests | `python -m pytest tests/test_main.py tests/test_logging_config.py -v` | No | 47 passed |
 | Python compilation | `python -m compileall src tests scripts -q` | Yes | Passed locally |
 | Docker build | `docker build -t bug-triage-workflow .` | Yes | Passed locally |
 | Docker CLI smoke test | `docker run --rm bug-triage-workflow --help` | Yes | Passed locally |
@@ -350,7 +350,7 @@ Run the full automated test suite:
 python -m pytest
 ```
 
-Current verified result: **332 passed, 6 skipped**
+Current verified result: **339 passed, 6 skipped**
 
 The automated tests use fakes, stubs, mocks, and deterministic responses. The default suite does not call OpenAI, which keeps it fast, repeatable, inexpensive, and safe for CI. Real OpenAI behavior is demonstrated through the validated demo outputs and opt-in live evaluations.
 

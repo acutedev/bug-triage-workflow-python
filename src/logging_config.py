@@ -115,7 +115,7 @@ def _secure_opener(path: str, flags: int) -> int:
 
 
 class _SecureRotatingFileHandler(RotatingFileHandler):
-    """RotatingFileHandler that creates files with mode 0600."""
+    """RotatingFileHandler that creates files with mode 0600 and suppresses emit errors."""
 
     def _open(self):
         return open(
@@ -125,6 +125,11 @@ class _SecureRotatingFileHandler(RotatingFileHandler):
             errors=self.errors,
             opener=_secure_opener,
         )
+
+    def handleError(self, record: logging.LogRecord) -> None:
+        # Suppress errors from this handler (e.g., permission denied on delayed
+        # open) so they never produce "--- Logging error ---" output on stderr.
+        pass
 
 
 def configure_diagnostic_logging(
@@ -143,7 +148,8 @@ def configure_diagnostic_logging(
 
     If the path cannot be opened the logger falls back to a NullHandler so
     the CLI can still start. It is idempotent: repeated calls update existing
-    handler levels and formatters without attaching duplicates.
+    handler levels and formatters without attaching duplicates. A NullHandler
+    fallback is replaceable by a later call with a valid path.
     """
     if path is None:
         resolved = Path(tempfile.gettempdir()) / f"bug_triage_diagnostic_{os.getpid()}.log"
@@ -156,23 +162,32 @@ def configure_diagnostic_logging(
     formatter = JsonLogFormatter()
 
     if logger.handlers:
-        for handler in logger.handlers:
-            handler.setLevel(level)
-            handler.setFormatter(formatter)
+        if all(type(h) is logging.NullHandler for h in logger.handlers):
+            # Previous configure fell back to NullHandler; try to upgrade to a
+            # real file handler by removing the placeholder and falling through.
+            for h in list(logger.handlers):
+                logger.removeHandler(h)
+        else:
+            # Real handler already installed — update level/formatter only.
+            for handler in logger.handlers:
+                handler.setLevel(level)
+                handler.setFormatter(formatter)
+            return logger
+
+    # Validate the parent directory before installing a delayed handler so that
+    # clearly invalid paths fail fast with a NullHandler rather than producing
+    # a logging-internal error on the first emit.
+    if not resolved.parent.exists() or not resolved.parent.is_dir():
+        logger.addHandler(logging.NullHandler())
         return logger
 
-    try:
-        file_handler = _SecureRotatingFileHandler(
-            resolved,
-            maxBytes=1_000_000,
-            backupCount=2,
-            encoding="utf-8",
-        )
-    except Exception:
-        null_handler = logging.NullHandler()
-        logger.addHandler(null_handler)
-        return logger
-
+    file_handler = _SecureRotatingFileHandler(
+        resolved,
+        maxBytes=1_000_000,
+        backupCount=2,
+        encoding="utf-8",
+        delay=True,
+    )
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     logger.addHandler(file_handler)

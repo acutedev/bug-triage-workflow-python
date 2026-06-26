@@ -501,6 +501,30 @@ def test_invalid_diagnostic_path_does_not_prevent_startup(
     assert "Traceback" not in capsys.readouterr().err
 
 
+def test_help_does_not_create_diagnostic_file(
+    isolated_app_logger, monkeypatch, capsys, tmp_path
+):
+    """--help must not create the diagnostic file."""
+    from src.logging_config import (
+        configure_diagnostic_logging as real_diag,
+        configure_logging as real_configure_logging,
+    )
+    import io as _io
+
+    diag_path = tmp_path / "diag.log"
+    monkeypatch.setattr(sys, "stdout", _io.StringIO())
+    monkeypatch.setattr(main_module, "configure_logging", lambda **_: real_configure_logging())
+    monkeypatch.setattr(
+        main_module,
+        "configure_diagnostic_logging",
+        lambda **_: real_diag(path=diag_path),
+    )
+
+    exit_code = asyncio.run(main_module.main(["--help"]))
+    assert exit_code == 0
+    assert not diag_path.exists(), "--help must not create the diagnostic file"
+
+
 def test_help_exits_zero_with_invalid_diagnostic_path(
     isolated_app_logger, monkeypatch, capsys
 ):
