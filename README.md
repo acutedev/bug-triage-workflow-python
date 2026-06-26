@@ -334,12 +334,15 @@ tracebacks for expected operational errors.
 
 ```text
 .
+├── .dockerignore
 ├── .env.example
 ├── .github/
 │   └── workflows/
 │       └── tests.yml
 ├── .gitignore
 ├── README.md
+├── Dockerfile
+├── docker-compose.yml
 ├── docs/
 │   ├── demo_01_standard_ticket.txt
 │   ├── demo_02_request_more_info.txt
@@ -386,6 +389,76 @@ tracebacks for expected operational errors.
     ├── test_router.py
     └── test_workflow.py
 ```
+
+## Docker Quick-Start
+
+Docker lets you run the workflow without installing Python locally. The image
+is built from the local source; no pre-built image is published.
+
+**1. Copy the example environment file and add your API key:**
+
+```bash
+cp .env.example .env
+# then open .env and set LLM_API_KEY=your-openai-api-key
+```
+
+`.env` is passed to the container at runtime. It is listed in `.dockerignore`
+and is never copied into the image.
+
+**2. Build the image:**
+
+```bash
+docker build -t bug-triage-workflow .
+```
+
+**3. Run the built-in demo report:**
+
+```bash
+docker compose run --rm bug-triage --demo
+```
+
+
+**4. Run with inline text:**
+
+```bash
+docker compose run --rm bug-triage --text "The checkout button crashes in Chrome."
+```
+
+**5. Run with a file:**
+
+```bash
+docker compose run --rm bug-triage --file examples/security_bug.txt
+```
+
+**6. Run with piped stdin:**
+
+Pass `-T` to disable TTY allocation so Docker does not hold the pseudo-terminal
+and piped input flows correctly:
+
+```bash
+cat examples/security_bug.txt | docker compose run --rm -T bug-triage
+```
+
+Piped stdin consumes the container's standard input. Because of that, the same
+run cannot later accept an interactive human-review response. For reports that
+may require human review, use `--file` or `--text` instead. For a fully
+non-interactive piped run, disable human review explicitly:
+
+```bash
+cat examples/security_bug.txt | \
+  docker compose run --rm -T \
+  -e HUMAN_APPROVAL_ENABLED=false \
+  bug-triage
+```
+
+**Interactive human review:**
+
+When the workflow pauses for human review, the terminal prompts for one of
+three choices. This requires a TTY, which `docker compose run` allocates by
+default (`tty: true` in `docker-compose.yml`). Piped-stdin runs (`-T`) cannot
+drive the interactive prompt; use `--demo`, `--text`, or `--file` for
+interactive review paths, or set `HUMAN_APPROVAL_ENABLED=false` to bypass the
+pause.
 
 ## Prerequisites
 
@@ -487,7 +560,7 @@ python -m pytest
 Current verified result:
 
 ```text
-307 passed, 6 skipped
+309 passed, 6 skipped
 ```
 
 The automated tests use fakes, stubs, mocks, and deterministic responses. The
@@ -651,7 +724,7 @@ production hardening is listed under Next Steps for Production Readiness.
 - Human review is terminal-based rather than a production UI.
 - There is no production authentication or authorization layer.
 - Microsoft Agent Framework experimental warnings remain.
-- There is no deployment or container setup.
+- There is no production deployment configuration beyond a basic Docker image.
 
 ## Next Steps for Production Readiness
 
@@ -740,9 +813,8 @@ Input and API hardening:
 
 Deployment and operations:
 
-- Add containerization.
+- Add health checks, readiness probes, and a production-grade container orchestration setup (Kubernetes, ECS, etc.).
 - Add environment-specific configuration.
-- Add health checks, readiness checks, and liveness checks.
 - Add staged deployment and rollback strategy.
 - Add startup configuration validation.
 - Add backups where applicable.
@@ -767,7 +839,7 @@ Product integration:
 Repository evidence supports the following:
 
 - Ten demo scenarios were validated, including two adversarial scenarios and one deterministic low-confidence-review scenario.
-- The full deterministic automated suite passed with `307 passed, 6 skipped`.
+- The full deterministic automated suite passed with `309 passed, 6 skipped`.
 - Live adversarial evaluations passed with `6 passed` using `gpt-4.1-mini`.
 - Source, scripts, and test compilation succeeded.
 - `.env` is not tracked.

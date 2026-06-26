@@ -180,3 +180,38 @@ def test_main_generic_runtime_error_returns_one_and_logs_exception(
     assert exc_info[0] is RuntimeError
     assert str(exc_info[1]) == "unexpected failure"
     assert exc_info[2] is not None
+
+
+def test_help_exits_zero_without_api_key(monkeypatch, capsys):
+    """--help must succeed before load_config is ever reached."""
+    logger = CapturingLogger()
+    monkeypatch.setattr(main_module, "configure_logging", lambda: logger)
+    monkeypatch.setattr(
+        main_module,
+        "load_config",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("load_config must not be called for --help")
+        ),
+    )
+    exit_code = asyncio.run(main_module.main(["--help"]))
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "--demo" in out
+    assert "--text" in out
+    assert "--file" in out
+
+
+def test_help_short_flag_exits_zero_without_api_key(monkeypatch, capsys):
+    """-h must succeed before load_config is ever reached."""
+    logger = CapturingLogger()
+    monkeypatch.setattr(main_module, "configure_logging", lambda: logger)
+    monkeypatch.setattr(
+        main_module,
+        "load_config",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("load_config must not be called for -h")
+        ),
+    )
+    exit_code = asyncio.run(main_module.main(["-h"]))
+    assert exit_code == 0
+    assert "--demo" in capsys.readouterr().out

@@ -320,15 +320,15 @@ async def main(argv: list[str] | None = None) -> int:
 
     try:
         try:
+            args = parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code) if exc.code is not None else 2
+
+        try:
             config = load_config()
         except ValueError as error:
             print(f"Configuration error: {error}", file=sys.stderr)
             return 2
-
-        try:
-            args = parse_args(argv)
-        except SystemExit as exc:
-            return int(exc.code) if exc.code is not None else 2
 
         try:
             report_text, is_demo = resolve_input(args)

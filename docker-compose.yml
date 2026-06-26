@@ -1,0 +1,13 @@
+services:
+  bug-triage:
+    build: .
+    stdin_open: true
+    tty: true
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - LLM_PROVIDER
+      - LLM_API_KEY
+      - LLM_MODEL
+      - HUMAN_APPROVAL_ENABLED
