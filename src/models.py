@@ -7,8 +7,9 @@ in executor modules.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from enum import Enum
+from enum import Enum, auto
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -239,6 +240,109 @@ INTERMEDIATE_WORKFLOW_STATUSES = frozenset(
 )
 
 
+class _FieldPolicy(Enum):
+    UNCONSTRAINED = auto()
+    REQUIRED = auto()
+    FORBIDDEN = auto()
+
+
+@dataclass(frozen=True)
+class _StatusRules:
+    classification: _FieldPolicy = _FieldPolicy.UNCONSTRAINED
+    selected_route: _FieldPolicy = _FieldPolicy.UNCONSTRAINED
+    error: _FieldPolicy = _FieldPolicy.UNCONSTRAINED
+    final_action: _FieldPolicy = _FieldPolicy.UNCONSTRAINED
+    allowed_routes: frozenset[RouteName] | None = None
+
+
+_STATUS_RULES: dict[WorkflowStatus, _StatusRules] = {
+    WorkflowStatus.RECEIVED: _StatusRules(
+        classification=_FieldPolicy.FORBIDDEN,
+        selected_route=_FieldPolicy.FORBIDDEN,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+    WorkflowStatus.PREPROCESSED: _StatusRules(
+        classification=_FieldPolicy.FORBIDDEN,
+        selected_route=_FieldPolicy.FORBIDDEN,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+    WorkflowStatus.CLASSIFIED: _StatusRules(
+        classification=_FieldPolicy.REQUIRED,
+        selected_route=_FieldPolicy.FORBIDDEN,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+    WorkflowStatus.ROUTED: _StatusRules(
+        classification=_FieldPolicy.REQUIRED,
+        selected_route=_FieldPolicy.REQUIRED,
+        allowed_routes=ROUTED_ROUTES,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+    WorkflowStatus.AWAITING_HUMAN_REVIEW: _StatusRules(
+        classification=_FieldPolicy.REQUIRED,
+    ),
+    WorkflowStatus.ESCALATION_APPROVED: _StatusRules(
+        classification=_FieldPolicy.REQUIRED,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+    WorkflowStatus.STANDARD_TICKET_SELECTED: _StatusRules(
+        classification=_FieldPolicy.REQUIRED,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+    WorkflowStatus.REPORT_REJECTED: _StatusRules(
+        classification=_FieldPolicy.REQUIRED,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+    WorkflowStatus.COMPLETED: _StatusRules(
+        classification=_FieldPolicy.REQUIRED,
+        selected_route=_FieldPolicy.REQUIRED,
+        allowed_routes=COMPLETED_ROUTES,
+        error=_FieldPolicy.FORBIDDEN,
+        final_action=_FieldPolicy.REQUIRED,
+    ),
+    WorkflowStatus.FAILED: _StatusRules(
+        error=_FieldPolicy.REQUIRED,
+        final_action=_FieldPolicy.FORBIDDEN,
+    ),
+}
+
+
+def _check_field_policy(
+    status: WorkflowStatus,
+    field_name: str,
+    value: object,
+    policy: _FieldPolicy,
+) -> None:
+    if policy is _FieldPolicy.REQUIRED and value is None:
+        raise ValueError(
+            f"{field_name} is required when status is {status.value}"
+        )
+    if policy is _FieldPolicy.FORBIDDEN and value is not None:
+        raise ValueError(
+            f"{field_name} must be None when status is {status.value}"
+        )
+
+
+def _check_allowed_routes(
+    status: WorkflowStatus,
+    selected_route: RouteName | None,
+    allowed_routes: frozenset[RouteName] | None,
+) -> None:
+    if allowed_routes is None:
+        return
+    if selected_route is not None and selected_route not in allowed_routes:
+        raise ValueError(
+            f"selected_route {selected_route.value} is not valid "
+            f"when status is {status.value}"
+        )
+
+
 class WorkflowResult(StrictBaseModel):
     status: WorkflowStatus
     selected_route: RouteName | None = None
@@ -258,18 +362,6 @@ class WorkflowResult(StrictBaseModel):
         if v is not None and not v.strip():
             raise ValueError("optional text fields must not be blank when provided")
         return v
-
-    def _require_classification(self) -> None:
-        if self.classification is None:
-            raise ValueError(
-                f"classification is required when status is {self.status.value}"
-            )
-
-    def _require_selected_route(self) -> None:
-        if self.selected_route is None:
-            raise ValueError(
-                f"selected_route is required when status is {self.status.value}"
-            )
 
     def _validate_no_review_summary(self, *, route: RouteName) -> None:
         if self.human_review_required:
@@ -293,16 +385,6 @@ class WorkflowResult(StrictBaseModel):
         if self.approval_granted is not None:
             raise ValueError(
                 f"approval_granted must be None when status is {self.status.value}"
-            )
-
-    def _validate_no_route_or_classification(self) -> None:
-        if self.selected_route is not None:
-            raise ValueError(
-                f"selected_route must be None when status is {self.status.value}"
-            )
-        if self.classification is not None:
-            raise ValueError(
-                f"classification must be None when status is {self.status.value}"
             )
 
     def _validate_review_action(
@@ -369,10 +451,9 @@ class WorkflowResult(StrictBaseModel):
         if self.status is not WorkflowStatus.FAILED:
             return
 
-        if not self.error:
-            raise ValueError("error is required when status is failed")
-        if self.final_action is not None:
-            raise ValueError("final_action must be None when status is failed")
+        rules = _STATUS_RULES[self.status]
+        _check_field_policy(self.status, "error", self.error, rules.error)
+        _check_field_policy(self.status, "final_action", self.final_action, rules.final_action)
         if self.approval_granted is not None:
             raise ValueError("approval_granted must be None when status is failed")
         if self.human_review_action is not None:
@@ -382,17 +463,12 @@ class WorkflowResult(StrictBaseModel):
         if self.status is not WorkflowStatus.COMPLETED:
             return
 
-        self._require_selected_route()
-        self._require_classification()
-        if not self.final_action:
-            raise ValueError("final_action is required when status is completed")
-        if self.error is not None:
-            raise ValueError("error must be None when status is completed")
-        if self.selected_route not in COMPLETED_ROUTES:
-            raise ValueError(
-                f"selected_route {self.selected_route.value} is not valid "
-                "when status is completed"
-            )
+        rules = _STATUS_RULES[self.status]
+        _check_field_policy(self.status, "selected_route", self.selected_route, rules.selected_route)
+        _check_field_policy(self.status, "classification", self.classification, rules.classification)
+        _check_field_policy(self.status, "final_action", self.final_action, rules.final_action)
+        _check_field_policy(self.status, "error", self.error, rules.error)
+        _check_allowed_routes(self.status, self.selected_route, rules.allowed_routes)
 
         if self.selected_route is RouteName.REQUEST_MORE_INFO:
             self._validate_no_review_summary(route=RouteName.REQUEST_MORE_INFO)
@@ -423,7 +499,8 @@ class WorkflowResult(StrictBaseModel):
         if self.status is not WorkflowStatus.AWAITING_HUMAN_REVIEW:
             return
 
-        self._require_classification()
+        rules = _STATUS_RULES[self.status]
+        _check_field_policy(self.status, "classification", self.classification, rules.classification)
         if not self.human_review_required:
             raise ValueError("human_review_required must be true while awaiting human review")
         if self.selected_route is not RouteName.REQUEST_HUMAN_APPROVAL:
@@ -445,7 +522,8 @@ class WorkflowResult(StrictBaseModel):
         if self.status is not WorkflowStatus.REPORT_REJECTED:
             return
 
-        self._require_classification()
+        rules = _STATUS_RULES[self.status]
+        _check_field_policy(self.status, "classification", self.classification, rules.classification)
         if (
             not self.human_review_required
             or self.human_review_action is not HumanReviewAction.REJECT_REPORT
@@ -453,38 +531,29 @@ class WorkflowResult(StrictBaseModel):
             or self.selected_route is not RouteName.LOG_REJECTION
         ):
             raise ValueError("report_rejected status requires report rejection")
-        if self.final_action is not None:
-            raise ValueError("final_action must be None when status is report_rejected")
-        if self.error is not None:
-            raise ValueError("error must be None when status is report_rejected")
+        _check_field_policy(self.status, "final_action", self.final_action, rules.final_action)
+        _check_field_policy(self.status, "error", self.error, rules.error)
 
     def _validate_intermediate_status(self) -> None:
         if self.status not in INTERMEDIATE_WORKFLOW_STATUSES:
             return
 
-        if self.final_action is not None:
-            raise ValueError(
-                f"final_action must be None when status is {self.status.value}"
-            )
-        if self.error is not None:
-            raise ValueError(f"error must be None when status is {self.status.value}")
+        rules = _STATUS_RULES[self.status]
+        _check_field_policy(self.status, "final_action", self.final_action, rules.final_action)
+        _check_field_policy(self.status, "error", self.error, rules.error)
 
         if self.status in {WorkflowStatus.RECEIVED, WorkflowStatus.PREPROCESSED}:
-            self._validate_no_route_or_classification()
+            _check_field_policy(self.status, "selected_route", self.selected_route, rules.selected_route)
+            _check_field_policy(self.status, "classification", self.classification, rules.classification)
             self._validate_empty_review_summary_for_status()
         elif self.status is WorkflowStatus.CLASSIFIED:
-            self._require_classification()
-            if self.selected_route is not None:
-                raise ValueError("selected_route must be None when status is classified")
+            _check_field_policy(self.status, "classification", self.classification, rules.classification)
+            _check_field_policy(self.status, "selected_route", self.selected_route, rules.selected_route)
             self._validate_empty_review_summary_for_status()
         elif self.status is WorkflowStatus.ROUTED:
-            self._require_classification()
-            self._require_selected_route()
-            if self.selected_route not in ROUTED_ROUTES:
-                raise ValueError(
-                    f"selected_route {self.selected_route.value} is not valid "
-                    "when status is routed"
-                )
+            _check_field_policy(self.status, "classification", self.classification, rules.classification)
+            _check_field_policy(self.status, "selected_route", self.selected_route, rules.selected_route)
+            _check_allowed_routes(self.status, self.selected_route, rules.allowed_routes)
             if self.human_review_action is not None:
                 raise ValueError("human_review_action must be None when status is routed")
             if self.approval_granted is not None:
@@ -501,7 +570,7 @@ class WorkflowResult(StrictBaseModel):
                     f"to {self.selected_route.value}"
                 )
         elif self.status is WorkflowStatus.ESCALATION_APPROVED:
-            self._require_classification()
+            _check_field_policy(self.status, "classification", self.classification, rules.classification)
             if self.selected_route is not RouteName.CREATE_ESCALATION_TICKET:
                 raise ValueError(
                     "selected_route must be create_escalation_ticket when "
@@ -513,7 +582,7 @@ class WorkflowResult(StrictBaseModel):
                 approval_granted=True,
             )
         elif self.status is WorkflowStatus.STANDARD_TICKET_SELECTED:
-            self._require_classification()
+            _check_field_policy(self.status, "classification", self.classification, rules.classification)
             if self.selected_route is not RouteName.CREATE_STANDARD_TICKET:
                 raise ValueError(
                     "selected_route must be create_standard_ticket when "
