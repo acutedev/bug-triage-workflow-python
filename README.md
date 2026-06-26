@@ -168,14 +168,15 @@ cat examples/security_bug.txt | python -m src.main
 |---|---|---|---|
 | Deterministic test suite | `python -m pytest` | Yes | 332 passed, 6 skipped |
 | Focused CLI/logging tests | `python -m pytest tests/test_main.py tests/test_logging_config.py -v` | No | 41 passed |
-| Python compilation | `python -m compileall src tests scripts -q` | Not yet | Passed locally |
-| Docker build | `docker build -t bug-triage-workflow .` | Not yet | Passed locally |
-| Docker CLI smoke test | `docker run --rm bug-triage-workflow --help` | Not yet | Passed locally |
-| Docker non-root check | `docker run --rm --entrypoint id bug-triage-workflow` | Not yet | uid=1000(appuser) |
+| Python compilation | `python -m compileall src tests scripts -q` | Yes | Passed locally |
+| Docker build | `docker build -t bug-triage-workflow .` | Yes | Passed locally |
+| Docker CLI smoke test | `docker run --rm bug-triage-workflow --help` | Yes | Passed locally |
+| Docker non-root check | `docker run --rm --entrypoint id bug-triage-workflow` | Yes | uid=1000(appuser) |
+| Tracked-file hygiene check | `git ls-files \| grep -E '…'` | Yes | No tracked artifacts |
 | Live adversarial evaluations | `python -m pytest tests/eval -m eval --run-evals -v` | No, opt-in | 6 passed |
-| Secret and tracked-file audit | Documented release-audit commands below | No | Passed locally; reverify before public release |
+| Full secret scan / public-release audit | Documented release-audit commands below | No | Passed locally; reverify before public release |
 
-The GitHub Actions workflow (`.github/workflows/tests.yml`) installs dependencies on Python 3.12 and runs `python -m pytest` (deterministic suite only).
+The GitHub Actions workflow (`.github/workflows/tests.yml`) runs on Python 3.12 with pip caching and covers: dependency installation, deterministic test suite, Python compilation, tracked-file hygiene, Docker image build, Docker CLI smoke test, and Docker non-root check. No API key or secrets are required.
 
 ## Core Engineering Decisions
 
@@ -556,7 +557,7 @@ Code quality:
 
 CI/CD:
 
-- Expand GitHub Actions to cover dependency installation, automated tests, linting, type checking, `compileall`, README link validation, and secret scanning.
+- Expand GitHub Actions to add linting, type checking, README link validation, and secret scanning.
 - Add branch protection and required status checks.
 - Use protected production environments for deployment workflows.
 
