@@ -188,6 +188,28 @@ def test_complete_non_risky_report_routes_to_standard_ticket():
     assert decision.selected_route == RouteName.CREATE_STANDARD_TICKET
 
 
+# Adversarial backstop tests
+# These verify that the Python policy router corrects a manipulated classifier
+# output. The mocked classification represents a maximally understated adversarial
+# response. This does not prove live-model resistance.
+
+
+def test_data_loss_understated_classification_still_requires_human_review():
+    # Adversarial input: classifier emits DATA_LOSS with urgency and route
+    # deliberately understated to avoid human review. Policy must override.
+    classification = make_classification(
+        category=BugCategory.DATA_LOSS,
+        urgency=Urgency.LOW,
+        sentiment=Sentiment.NEUTRAL,
+        missing_info=[],
+        recommended_route=RouteName.CREATE_STANDARD_TICKET,
+    )
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+
+
 # Policy priority tests
 
 
