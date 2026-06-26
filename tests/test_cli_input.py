@@ -33,7 +33,8 @@ def make_config() -> AppConfig:
 def configure_cli_test(monkeypatch, *, piped_stdin: bool = False):
     logger = CapturingLogger()
     config = make_config()
-    monkeypatch.setattr(main_module, "configure_logging", lambda: logger)
+    monkeypatch.setattr(main_module, "configure_logging", lambda **_: logger)
+    monkeypatch.setattr(main_module, "configure_diagnostic_logging", lambda **_: logger)
     monkeypatch.setattr(main_module, "load_config", lambda: config)
     if not piped_stdin:
         monkeypatch.setattr(sys, "stdin", _InteractiveTty())

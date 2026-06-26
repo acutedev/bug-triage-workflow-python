@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import pathlib
 import sys
 from dataclasses import asdict, is_dataclass
@@ -13,7 +14,7 @@ from typing import Any
 from openai import OpenAIError
 
 from src.config import AppConfig, load_config
-from src.logging_config import configure_logging
+from src.logging_config import configure_diagnostic_logging, configure_logging
 from src.models import HumanReviewAction, HumanReviewDecision, WorkflowResult
 from src.openai_provider import build_classifier_agent
 from src.workflow import build_bug_triage_workflow
@@ -317,6 +318,9 @@ def resolve_input(args: argparse.Namespace) -> tuple[str | None, bool]:
 async def main(argv: list[str] | None = None) -> int:
     """Command-line entry point."""
     logger = configure_logging()
+    diagnostic_logger = configure_diagnostic_logging(
+        path=os.environ.get("BUG_TRIAGE_DIAGNOSTIC_LOG")
+    )
 
     try:
         try:
@@ -346,8 +350,16 @@ async def main(argv: list[str] | None = None) -> int:
     except EOFError:
         print("Input closed; bug triage workflow cancelled.", file=sys.stderr)
         return 1
-    except OpenAIError as error:
-        print(f"Provider error: {error}", file=sys.stderr)
+    except OpenAIError:
+        # Full exception details (traceback, raw provider message) go only to
+        # the diagnostic file — not to the console.
+        diagnostic_logger.exception("Provider error calling classifier service")
+        logger.error("Provider error calling classifier service")
+        print(
+            "Provider error: the classifier service could not complete the"
+            " request. See logs for details.",
+            file=sys.stderr,
+        )
         return 1
     except Exception:
         logger.exception("Bug triage CLI failed unexpectedly")

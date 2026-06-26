@@ -4,12 +4,16 @@ import io
 import json
 import logging
 import sys
+import tempfile
+from pathlib import Path
 
 import pytest
 
 from src.logging_config import (
     APP_LOGGER_NAME,
+    DIAGNOSTIC_LOGGER_NAME,
     JsonLogFormatter,
+    configure_diagnostic_logging,
     configure_logging,
     get_logger,
 )
@@ -17,24 +21,29 @@ from src.logging_config import (
 
 @pytest.fixture
 def isolated_application_logger():
-    logger = logging.getLogger(APP_LOGGER_NAME)
-    original_level = logger.level
-    original_handlers = list(logger.handlers)
-    original_propagate = logger.propagate
+    """Isolate the app and diagnostic loggers for tests in this module."""
+    saved: dict[str, dict] = {}
+    for name in (APP_LOGGER_NAME, DIAGNOSTIC_LOGGER_NAME):
+        lg = logging.getLogger(name)
+        saved[name] = {
+            "level": lg.level,
+            "handlers": list(lg.handlers),
+            "propagate": lg.propagate,
+        }
+        for h in saved[name]["handlers"]:
+            lg.removeHandler(h)
 
-    for handler in original_handlers:
-        logger.removeHandler(handler)
+    yield logging.getLogger(APP_LOGGER_NAME)
 
-    yield logger
-
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
-
-    logger.setLevel(original_level)
-    logger.propagate = original_propagate
-    for handler in original_handlers:
-        logger.addHandler(handler)
+    for name in (APP_LOGGER_NAME, DIAGNOSTIC_LOGGER_NAME):
+        lg = logging.getLogger(name)
+        for h in list(lg.handlers):
+            lg.removeHandler(h)
+            h.close()
+        lg.setLevel(saved[name]["level"])
+        lg.propagate = saved[name]["propagate"]
+        for h in saved[name]["handlers"]:
+            lg.addHandler(h)
 
 
 def test_configure_logging_configures_only_application_logger(
@@ -91,6 +100,27 @@ def test_configure_logging_is_idempotent_when_handlers_already_exist(
     assert isolated_application_logger.handlers == [existing_handler]
     assert existing_handler.level == logging.ERROR
     assert isinstance(existing_handler.formatter, JsonLogFormatter)
+
+
+def test_configure_logging_console_handler_emits_exc_info(
+    isolated_application_logger, monkeypatch
+):
+    """The console handler must NOT strip exc_info — unrelated tracebacks must appear."""
+    stream = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", stream)
+
+    configured_logger = configure_logging()
+
+    try:
+        raise RuntimeError("unexpected-error-XYZZY")
+    except RuntimeError:
+        configured_logger.exception("Something went wrong")
+
+    output = stream.getvalue()
+    payload = json.loads(output)
+    assert "exception" in payload
+    assert "unexpected-error-XYZZY" in payload["exception"]
+    assert "Traceback" in payload["exception"]
 
 
 def test_get_logger_returns_application_logger_when_name_is_none():
@@ -157,3 +187,205 @@ def test_json_log_formatter_includes_extra_fields():
         "executor": "policy_router",
         "route": "request_human_approval",
     }
+
+
+# ---------------------------------------------------------------------------
+# configure_diagnostic_logging tests
+# ---------------------------------------------------------------------------
+
+
+def test_configure_diagnostic_logging_uses_file_handler(
+    isolated_application_logger, tmp_path
+):
+    diag_path = tmp_path / "diag.log"
+    diag_logger = configure_diagnostic_logging(path=diag_path)
+
+    assert diag_logger.name == DIAGNOSTIC_LOGGER_NAME
+    assert diag_logger.propagate is False
+    assert len(diag_logger.handlers) == 1
+    assert isinstance(diag_logger.handlers[0], logging.FileHandler)
+
+
+def test_configure_diagnostic_logging_retains_full_exc_info(
+    isolated_application_logger, tmp_path
+):
+    """The diagnostic file must include exc_info and traceback text."""
+    diag_path = tmp_path / "diag.log"
+    diag_logger = configure_diagnostic_logging(path=diag_path)
+
+    try:
+        raise RuntimeError("provider-secret-XYZ")
+    except RuntimeError:
+        diag_logger.exception("Provider error calling classifier service")
+
+    content = diag_path.read_text(encoding="utf-8")
+    payload = json.loads(content)
+    assert "exception" in payload
+    assert "provider-secret-XYZ" in payload["exception"]
+    assert "Traceback" in payload["exception"]
+
+
+def test_configure_diagnostic_logging_does_not_propagate(
+    isolated_application_logger, monkeypatch, tmp_path
+):
+    """Diagnostic logger must not write to the console handler."""
+    console_stream = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", console_stream)
+    configure_logging()  # sets up console handler on the app logger
+
+    diag_path = tmp_path / "diag.log"
+    diag_logger = configure_diagnostic_logging(path=diag_path)
+
+    try:
+        raise RuntimeError("should-not-reach-console")
+    except RuntimeError:
+        diag_logger.exception("Provider error")
+
+    assert "should-not-reach-console" not in console_stream.getvalue()
+
+
+def test_configure_diagnostic_logging_default_path_uses_tempdir(
+    isolated_application_logger,
+):
+    """When no path is given, the handler writes to the OS temp directory."""
+    import os
+
+    diag_logger = configure_diagnostic_logging()
+
+    assert len(diag_logger.handlers) == 1
+    handler = diag_logger.handlers[0]
+    assert isinstance(handler, logging.FileHandler)
+    # Default filename must be process-specific (contain PID) and in tempdir.
+    base = Path(handler.baseFilename)
+    assert base.parent == Path(tempfile.gettempdir())
+    assert str(os.getpid()) in base.name
+
+
+def test_configure_diagnostic_logging_is_idempotent(
+    isolated_application_logger, tmp_path
+):
+    existing_handler = logging.FileHandler(tmp_path / "diag.log")
+    diag_logger = logging.getLogger(DIAGNOSTIC_LOGGER_NAME)
+    diag_logger.addHandler(existing_handler)
+
+    configure_diagnostic_logging(path=tmp_path / "other.log", level=logging.WARNING)
+
+    assert diag_logger.handlers == [existing_handler]
+    assert diag_logger.level == logging.WARNING
+    assert existing_handler.level == logging.WARNING
+
+
+# ---------------------------------------------------------------------------
+# File permissions (0600)
+# ---------------------------------------------------------------------------
+
+
+def test_diagnostic_file_default_mode_is_0600(isolated_application_logger, tmp_path):
+    """Default diagnostic file must be created with mode 0600."""
+    import os
+
+    diag_path = tmp_path / "diag_default.log"
+    configure_diagnostic_logging(path=diag_path)
+
+    # Emit one record so the file is created.
+    logging.getLogger(DIAGNOSTIC_LOGGER_NAME).debug("ping")
+
+    stat = os.stat(diag_path)
+    assert oct(stat.st_mode & 0o777) == oct(0o600)
+
+
+def test_diagnostic_file_override_path_mode_is_0600(
+    isolated_application_logger, tmp_path
+):
+    """An explicit override path must also be created with mode 0600."""
+    import os
+
+    diag_path = tmp_path / "custom_diag.log"
+    configure_diagnostic_logging(path=diag_path)
+    logging.getLogger(DIAGNOSTIC_LOGGER_NAME).debug("ping")
+
+    stat = os.stat(diag_path)
+    assert oct(stat.st_mode & 0o777) == oct(0o600)
+
+
+# ---------------------------------------------------------------------------
+# Startup resilience
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_path_falls_back_to_null_handler(isolated_application_logger):
+    """An unwritable/invalid path must return a logger with a NullHandler."""
+    diag_logger = configure_diagnostic_logging(path="/nonexistent/no/such/dir/diag.log")
+
+    assert diag_logger.name == DIAGNOSTIC_LOGGER_NAME
+    assert diag_logger.propagate is False
+    assert len(diag_logger.handlers) == 1
+    assert isinstance(diag_logger.handlers[0], logging.NullHandler)
+
+
+def test_fallback_logger_does_not_emit_to_console(
+    isolated_application_logger, monkeypatch
+):
+    """Fallback NullHandler logger must not write anything to stdout/stderr."""
+    import io
+
+    console = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", console)
+    monkeypatch.setattr(sys, "stderr", console)
+
+    diag_logger = configure_diagnostic_logging(path="/nonexistent/no/such/dir/diag.log")
+    try:
+        raise RuntimeError("should-not-appear-anywhere")
+    except RuntimeError:
+        diag_logger.exception("Provider error")
+
+    assert "should-not-appear-anywhere" not in console.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# Bounded, non-shared diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_default_filename_is_process_specific(isolated_application_logger):
+    """Default diagnostic filename must embed the current PID."""
+    import os
+
+    diag_logger = configure_diagnostic_logging()
+    handler = diag_logger.handlers[0]
+    assert str(os.getpid()) in Path(handler.baseFilename).name
+
+
+def test_diagnostic_handler_is_rotating_with_bounded_size(
+    isolated_application_logger, tmp_path
+):
+    """Diagnostic handler must be a RotatingFileHandler with size and backup limits."""
+    from logging.handlers import RotatingFileHandler
+
+    diag_path = tmp_path / "diag.log"
+    diag_logger = configure_diagnostic_logging(path=diag_path)
+
+    handler = diag_logger.handlers[0]
+    assert isinstance(handler, RotatingFileHandler)
+    assert handler.maxBytes > 0
+    assert handler.backupCount > 0
+
+
+def test_preexisting_0644_diagnostic_file_hardened_to_0600(
+    isolated_application_logger, tmp_path
+):
+    """A pre-existing diagnostic file with mode 0644 must be hardened to 0600."""
+    import os
+    import stat
+
+    diag_path = tmp_path / "diag.log"
+    diag_path.write_text("old content\n")
+    os.chmod(diag_path, 0o644)
+    assert stat.S_IMODE(os.stat(diag_path).st_mode) == 0o644
+
+    diag_logger = configure_diagnostic_logging(path=diag_path)
+    diag_logger.warning("probe record")
+
+    mode = stat.S_IMODE(os.stat(diag_path).st_mode)
+    assert mode == 0o600, f"Expected 0600, got {oct(mode)}"
+    assert diag_path.read_text().__contains__("probe record")
