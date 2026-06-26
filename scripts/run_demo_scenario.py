@@ -72,6 +72,14 @@ the form shows "Unable to save changes" instead of saving my updated display
 name. It should save successfully and show the updated profile.
 """.strip()
 
+LOW_CONFIDENCE_REVIEW_REPORT = """
+In production on Firefox using macOS, the account settings page renders broken
+layout — form labels overlap input fields and the Save button is partially
+hidden behind the footer. The layout should display each label beside its input
+field with the Save button fully visible. Reproduction: navigate to Settings >
+Account, resize the browser window to 1024 × 768.
+""".strip()
+
 INCOMPLETE_BUG_REPORT = "The login page is broken."
 
 CRITICAL_SECURITY_REPORT = """
@@ -213,6 +221,23 @@ SCENARIOS: dict[str, ScenarioSpec] = {
         expected_category=BugCategory.UI_BUG,
         allowed_urgencies=frozenset({Urgency.LOW, Urgency.MEDIUM}),
     ),
+    "low-confidence-review": ScenarioSpec(
+        name="low-confidence-review",
+        report=LOW_CONFIDENCE_REVIEW_REPORT,
+        expected_status=WorkflowStatus.COMPLETED,
+        expected_route=RouteName.CREATE_STANDARD_TICKET,
+        expected_human_review_required=True,
+        expected_human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
+        expected_approval_granted=None,
+        human_approval_enabled=True,
+        review_decision=HumanReviewDecision(
+            required=True,
+            action=HumanReviewAction.CREATE_STANDARD_TICKET,
+            approver="Demo Reviewer",
+            notes="Low-confidence report reviewed; standard ticket selected.",
+        ),
+        use_fake_classifier=True,
+    ),
 }
 
 
@@ -261,6 +286,62 @@ def build_malformed_classifier_agent() -> Agent:
         client=MalformedClassifierClient(),
         name="classifier_agent",
         instructions="Return malformed classifier output for demo validation.",
+        default_options={"response_format": TriageClassification},
+    )
+
+
+class _LowConfidenceClassifierClient:
+    """Deterministic MAF chat client that returns a valid but low-confidence classification."""
+
+    def get_response(
+        self,
+        messages: str | Message | list[str] | list[Message],
+        *,
+        stream: bool = False,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Awaitable[ChatResponse] | ResponseStream[ChatResponseUpdate, ChatResponse]:
+        del messages, kwargs
+        response_text = json.dumps({
+            "category": "ui_bug",
+            "urgency": "low",
+            "sentiment": "neutral",
+            "missing_info": [],
+            "recommended_route": "create_standard_ticket",
+            "reasoning": "Cosmetic layout regression detected; confidence is low.",
+            "confidence": 0.60,
+        })
+
+        if stream:
+            async def _stream() -> AsyncIterable[ChatResponseUpdate]:
+                yield ChatResponseUpdate(
+                    contents=[Content.from_text(response_text)],
+                    role="assistant",
+                    finish_reason="stop",
+                )
+
+            def _finalize(updates: list[ChatResponseUpdate]) -> ChatResponse:
+                return ChatResponse.from_updates(
+                    updates,
+                    output_format_type=(options or {}).get("response_format"),
+                )
+
+            return ResponseStream(_stream(), finalizer=_finalize)
+
+        async def _get() -> ChatResponse:
+            return ChatResponse(
+                messages=Message(role="assistant", contents=[response_text])
+            )
+
+        return _get()
+
+
+def build_low_confidence_classifier_agent() -> Agent:
+    """Build a deterministic fake classifier agent for low-confidence demos."""
+    return Agent(
+        client=_LowConfidenceClassifierClient(),
+        name="classifier_agent",
+        instructions="Return low-confidence classifier output for demo validation.",
         default_options={"response_format": TriageClassification},
     )
 
@@ -361,6 +442,8 @@ def validate_scenario_result(scenario_name: str, result: WorkflowResult) -> None
 def build_agent_for_scenario(spec: ScenarioSpec) -> Agent:
     """Build the classifier agent for a scenario."""
     if spec.use_fake_classifier:
+        if spec.name == "low-confidence-review":
+            return build_low_confidence_classifier_agent()
         return build_malformed_classifier_agent()
 
     config = load_config()

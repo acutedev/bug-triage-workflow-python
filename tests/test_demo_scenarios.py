@@ -170,6 +170,14 @@ def matching_result_for_scenario(scenario_name: str) -> WorkflowResult:
             error=None,
         )
 
+    if scenario_name == "low-confidence-review":
+        return make_completed_result(
+            RouteName.CREATE_STANDARD_TICKET,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.CREATE_STANDARD_TICKET,
+            approval_granted=None,
+        )
+
     raise AssertionError(f"Unsupported scenario in test: {scenario_name}")
 
 
@@ -184,6 +192,7 @@ def test_scenario_registry_contains_exactly_supported_names():
         "classifier-failure",
         "adversarial-security",
         "adversarial-benign-quote",
+        "low-confidence-review",
     ]
 
 
@@ -333,7 +342,7 @@ def test_no_secrets_appear_in_printed_output(monkeypatch, capsys):
     assert secret not in captured.err
 
 
-# --- Task 2D.5: optional classifier expectation tests ---
+# --- Optional classifier expectation tests ---
 
 
 def _spec_with(**kwargs) -> demo.ScenarioSpec:
@@ -406,7 +415,7 @@ def test_scenarios_without_optional_fields_validate_unchanged():
     demo.validate_result(spec, result)  # should not raise — fields not checked
 
 
-# --- Task 2D.6: adversarial scenario registration tests ---
+# --- Adversarial scenario registration tests ---
 
 
 def test_scenario_registry_contains_adversarial_scenarios():
@@ -433,7 +442,7 @@ def test_adversarial_benign_quote_scenario_configuration():
     assert spec.expected_approval_granted is None
 
 
-# --- Task 2D.7: fake-agent end-to-end execution of adversarial contracts ---
+# --- Fake-agent end-to-end execution of adversarial contracts ---
 
 
 class _DeterministicClassifierClient:
@@ -518,4 +527,62 @@ def test_fake_agent_executes_adversarial_benign_quote_contract():
     result = asyncio.run(
         demo.run_scenario_workflow(spec, agent, event_printer=lambda _: None)
     )
+    demo.validate_result(spec, result)
+
+
+# --- Low-confidence-review scenario tests ---
+
+
+def test_scenario_registry_contains_low_confidence_review():
+    assert "low-confidence-review" in demo.SCENARIOS
+
+
+def test_low_confidence_review_scenario_configuration():
+    spec = demo.SCENARIOS["low-confidence-review"]
+    assert spec.expected_route == RouteName.CREATE_STANDARD_TICKET
+    assert spec.expected_human_review_required is True
+    assert spec.expected_human_review_action == HumanReviewAction.CREATE_STANDARD_TICKET
+    assert spec.expected_approval_granted is None
+    assert spec.review_decision is not None
+    assert spec.review_decision.action == HumanReviewAction.CREATE_STANDARD_TICKET
+    assert spec.use_fake_classifier is True
+
+
+def test_low_confidence_review_fake_agent_emits_confidence_below_threshold():
+    spec = demo.SCENARIOS["low-confidence-review"]
+    agent = _make_deterministic_agent({
+        "category": "ui_bug",
+        "urgency": "low",
+        "sentiment": "neutral",
+        "missing_info": [],
+        "recommended_route": "create_standard_ticket",
+        "reasoning": "Cosmetic layout regression, low classifier confidence.",
+        "confidence": 0.60,
+    })
+    result = asyncio.run(
+        demo.run_scenario_workflow(spec, agent, event_printer=lambda _: None)
+    )
+    assert result.classification is not None
+    assert result.classification.confidence < 0.70
+
+
+def test_low_confidence_review_fake_agent_completes_via_human_review():
+    spec = demo.SCENARIOS["low-confidence-review"]
+    agent = _make_deterministic_agent({
+        "category": "ui_bug",
+        "urgency": "low",
+        "sentiment": "neutral",
+        "missing_info": [],
+        "recommended_route": "create_standard_ticket",
+        "reasoning": "Cosmetic layout regression, low classifier confidence.",
+        "confidence": 0.60,
+    })
+    result = asyncio.run(
+        demo.run_scenario_workflow(spec, agent, event_printer=lambda _: None)
+    )
+    assert result.status == WorkflowStatus.COMPLETED
+    assert result.selected_route == RouteName.CREATE_STANDARD_TICKET
+    assert result.human_review_required is True
+    assert result.human_review_action == HumanReviewAction.CREATE_STANDARD_TICKET
+    assert result.approval_granted is None
     demo.validate_result(spec, result)
