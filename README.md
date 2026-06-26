@@ -47,7 +47,8 @@ Key technologies:
 - CLI demonstration in `src/main.py`.
 - Validated scenario runner with automatic outcome checks in `scripts/run_demo_scenario.py`.
 - Automated tests using fakes, stubs, mocks, and deterministic responses.
-- Seven validated demo scenario outputs in `docs/`.
+- Nine validated demo scenario outputs in `docs/`.
+- Adversarial evaluation for prompt-injection and benign-content robustness, with verified live-eval results.
 
 ## Architecture
 
@@ -66,7 +67,7 @@ The implementation is split into small modules with clear responsibilities and f
 - `src/workflow_trace.py` maintains the per-run workflow event trace.
 - `src/logging_config.py` configures JSON logging.
 - `src/main.py` provides the sample CLI demo.
-- `scripts/run_demo_scenario.py` runs and validates the seven demo scenarios.
+- `scripts/run_demo_scenario.py` runs and validates the nine demo scenarios.
 
 Main data flow:
 
@@ -162,7 +163,7 @@ This structure supports the following IDesign goals:
 - **No tunneling:** engines do not reach through unrelated layers to call external resources; the workflow manager coordinates the business flow explicitly.
 - **Deterministic policy ownership:** the LLM classifies and recommends, while auditable Python policy selects the route.
 - **Context-aware design:** the project keeps these boundaries in one deployable process because separate network services would add unnecessary complexity for the assignment scope.
-- **Realization and validation:** the automated tests and seven validated demo scenarios realize the significant user stories and verify each route, review decision, state transition, and expected failure path.
+- **Realization and validation:** the automated tests and nine validated demo scenarios realize the significant user stories and verify each route, review decision, state transition, and expected failure path.
 
 The current implementation therefore follows IDesign as a logical component architecture. It does not claim to be a complete production HLD with independently deployed services, durable resources, or production accessors.
 
@@ -329,7 +330,9 @@ tracebacks for expected operational errors.
 │   ├── demo_04_standard_ticket_selected.txt
 │   ├── demo_05_report_rejected.txt
 │   ├── demo_06_direct_escalation_review_disabled.txt
-│   └── demo_07_classifier_output_failure.txt
+│   ├── demo_07_classifier_output_failure.txt
+│   ├── demo_08_adversarial_security.txt
+│   └── demo_09_adversarial_benign_quote.txt
 ├── pytest.ini
 ├── requirements.txt
 ├── scripts/
@@ -349,6 +352,8 @@ tracebacks for expected operational errors.
 │   ├── workflow_results.py
 │   └── workflow_trace.py
 └── tests/
+    ├── eval/
+    │   └── test_adversarial_classifier.py
     ├── test_classifier.py
     ├── test_config.py
     ├── test_demo_scenarios.py
@@ -442,19 +447,40 @@ python -m pytest
 Current verified result:
 
 ```text
-226 passed, 2 warnings
+266 passed, 6 skipped
 ```
 
-The two warnings come from experimental Microsoft Agent Framework components:
-`SkillResource` and `MemoryStore`.
+The automated tests use fakes, stubs, mocks, and deterministic responses. The
+default suite does not call OpenAI, which keeps it fast, repeatable,
+inexpensive, and safe for CI. Real OpenAI behavior is demonstrated through the
+demo outputs in `docs/`.
 
-The automated tests use fakes, stubs, mocks, and deterministic responses. Normal
-tests do not call OpenAI, which keeps them fast, repeatable, inexpensive, and
-safe for CI. Real OpenAI behavior is demonstrated separately through the demo
-outputs in `docs/`.
+### Live Adversarial Evaluations
+
+An opt-in live-eval suite exercises the real OpenAI-backed classifier against
+adversarial inputs:
+
+```bash
+python -m pytest tests/eval -m eval --run-evals -v
+```
+
+The `-m eval` flag selects tests carrying the `eval` marker. The `--run-evals`
+flag explicitly authorizes their execution; without it the eval tests are
+skipped even when selected by `-m eval`. Live evals also require a valid OpenAI
+API configuration and incur API usage. They are intentionally excluded from the
+default `python -m pytest` run to keep the default suite deterministic and free
+of external dependencies. Live evals supplement rather than replace the
+deterministic tests.
+
+Verified live-eval result using `gpt-4.1-mini`:
+
+```text
+6 passed
+```
 
 The current GitHub Actions workflow in `.github/workflows/tests.yml` installs
-dependencies on Python 3.12 and runs `python -m pytest`.
+dependencies on Python 3.12 and runs `python -m pytest` (deterministic suite
+only).
 
 ## Running Demo Scenarios
 
@@ -473,10 +499,13 @@ Supported scenario names:
 - `report-rejected`
 - `direct-escalation`
 - `classifier-failure`
+- `adversarial-security`
+- `adversarial-benign-quote`
 
-Scenarios `standard-ticket` through `direct-escalation` use the configured real
-OpenAI-backed classifier. `classifier-failure` uses a deterministic fake
-malformed classifier response and does not call OpenAI.
+Scenarios `standard-ticket` through `direct-escalation` and both
+`adversarial-*` scenarios use the configured real OpenAI-backed classifier.
+`classifier-failure` uses a deterministic fake malformed classifier response
+and does not call OpenAI.
 
 Each successful scenario prints:
 
@@ -503,6 +532,8 @@ Rerunning a command with the same `tee` target overwrites the file unless
 - [docs/demo_05_report_rejected.txt](docs/demo_05_report_rejected.txt): reviewer rejects the report.
 - [docs/demo_06_direct_escalation_review_disabled.txt](docs/demo_06_direct_escalation_review_disabled.txt): review-disabled configuration bypasses the human-review pause.
 - [docs/demo_07_classifier_output_failure.txt](docs/demo_07_classifier_output_failure.txt): malformed classifier output becomes a structured failed result.
+- [docs/demo_08_adversarial_security.txt](docs/demo_08_adversarial_security.txt): adversarial report embedding prompt-injection instructions is correctly classified as a security issue and routed for human approval.
+- [docs/demo_09_adversarial_benign_quote.txt](docs/demo_09_adversarial_benign_quote.txt): benign report quoting adversarial-style text is correctly classified as a UI bug and routed to a standard ticket.
 
 ## Logging
 
@@ -541,9 +572,12 @@ Implemented safeguards:
 - Local-path scanning was performed on tracked files.
 - Demo outputs were sanitized before submission.
 - A secret-shaped test fixture is split as `"sk-" + "demo-secret-should-not-print"` to avoid false-positive repository scans.
+- The classifier prompt includes a trust-boundary instruction that instructs the model to treat all user-supplied text as untrusted data and to ignore embedded instructions.
+- Adversarial evaluations (`tests/eval/`) verify that prompt-injection attempts in bug reports are handled correctly and that benign reports quoting adversarial-style text are not mis-classified. Six live-eval cases passed using `gpt-4.1-mini`.
 
-These are implementation safeguards for this project. They are not a formal
-security audit or a production security guarantee.
+These are implementation safeguards and evaluations for this project. They are
+not a formal security audit or a production security guarantee. Additional
+production hardening is listed under Next Steps for Production Readiness.
 
 ## Design Decisions
 
@@ -568,7 +602,7 @@ security audit or a production security guarantee.
 - IDesign roles are represented as logical in-process component boundaries rather than independently deployed services.
 - Workflow pause/resume state is not durably persisted across process restarts.
 - OpenAI model output can vary.
-- Normal automated tests do not call OpenAI.
+- The default `python -m pytest` suite does not call OpenAI; live evals are opt-in via `python -m pytest tests/eval -m eval --run-evals -v`.
 - Human review is terminal-based rather than a production UI.
 - There is no production authentication or authorization layer.
 - Microsoft Agent Framework experimental warnings remain.
@@ -602,7 +636,7 @@ Dependency management:
 
 Testing:
 
-- Add optional live OpenAI integration tests.
+- Live OpenAI adversarial evaluations exist in `tests/eval/` and are already opt-in. Expand coverage to include additional adversarial categories, edge cases, and model variants.
 - Keep live provider tests opt-in because of API cost, latency, external availability, rate limits, and nondeterministic model output.
 - Test manual bug entry if that CLI mode is added.
 - Test OpenAI timeout behavior, rate-limit behavior, and malformed provider responses.
@@ -643,7 +677,7 @@ Security and privacy:
 - Add audit trails.
 - Add reviewer authentication and authorization.
 - Enforce least-privilege access.
-- Add prompt-injection defenses.
+- Harden prompt-injection defenses beyond the current trust-boundary instruction (e.g., input sanitization, output validation, red-team testing, defense-in-depth layers).
 - Add model-output security review.
 - Require encryption in transit and at rest for production data stores and integrations.
 - Define a secure logging policy.
@@ -687,8 +721,9 @@ Product integration:
 
 Repository evidence supports the following:
 
-- Seven demo scenarios were validated.
-- The full automated suite passed with `226 passed, 2 warnings`.
+- Nine demo scenarios were validated, including two adversarial scenarios.
+- The full deterministic automated suite passed with `266 passed, 6 skipped`.
+- Live adversarial evaluations passed with `6 passed` using `gpt-4.1-mini`.
 - Source, scripts, and test compilation succeeded.
 - `.env` is not tracked.
 - No committed secrets were found.
