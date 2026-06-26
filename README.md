@@ -1,89 +1,55 @@
 # Bug Triage Workflow with Microsoft Agent Framework
 
-This project is a Python bug-triage workflow built with Microsoft Agent
-Framework. It takes a bug report, preprocesses it deterministically, classifies
-it with an OpenAI-backed native agent, validates all structured data with
-Pydantic, routes the report through deterministic Python policy, and produces a
-strictly validated `WorkflowResult`.
+This project is a Python bug-triage workflow built with the Microsoft Agent Framework. It accepts a natural-language bug report, preprocesses it deterministically, classifies it with an OpenAI-backed native agent using SDK-enforced structured output, routes the report through auditable Python policy, and produces a strictly validated `WorkflowResult`. Safety overrides escalate risky reports to human review before any ticket is created; low-confidence classifications pause the workflow for a human decision. The entire run is captured in structured JSON logs.
 
-The workflow demonstrates:
+[![CI](https://github.com/acutedev/bug-triage-workflow-python/actions/workflows/tests.yml/badge.svg)](https://github.com/acutedev/bug-triage-workflow-python/actions/workflows/tests.yml)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-3120/)
+[![Docker](https://img.shields.io/badge/docker-ready-blue.svg)](./Dockerfile)
 
-- deterministic preprocessing and metadata extraction
-- an LLM-backed classifier with strict structured output
-- deterministic routing policy
-- streamed Microsoft Agent Framework execution events
-- optional human review with pause/resume
-- strict workflow-state validation
-- structured JSON logging
-- automated tests and validated demo scenarios
+## Why This Project Matters
 
-Key technologies:
+This project demonstrates engineering patterns that matter in production LLM systems:
 
-- Python 3.12
-- Microsoft Agent Framework
-- OpenAI
-- Pydantic
-- pytest
+- **SDK-enforced structured output** — Pydantic validates every classifier response; malformed output becomes a structured failure, not a crash.
+- **Deterministic Python policy owns the final route** — the LLM classifies and recommends; auditable Python decides.
+- **Safety overrides for risky reports** — security, data-loss, critical, and high-emotion/high-urgency reports are always escalated to a human, regardless of the classifier recommendation.
+- **Confidence-based human review** — classifications below the 0.70 threshold pause the workflow for a human decision.
+- **Pause/resume human-in-the-loop execution** — the workflow emits an awaiting-review result, prompts the reviewer, and resumes with a typed decision.
+- **Adversarial evaluation and auditability** — a trust-boundary instruction guards against prompt injection; opt-in live evals verify robustness.
+- **Containerized reproducible execution** — Docker image runs the full workflow without a local Python install.
 
-## Key Features
+## End-to-End Example
 
-- Bug-report preprocessing with whitespace normalization.
-- Rule-based metadata extraction for module, browser, environment, and device or OS.
-- Missing-information detection for reproduction steps, environment, browser, device or OS, expected behavior, and actual behavior.
-- Native Microsoft Agent Framework `Agent` backed by OpenAI for classification.
-- Strict Pydantic structured output through `TriageClassification`.
-- Deterministic policy routing in Python through `route_triage`.
-- Microsoft Agent Framework executors and switch/case conditional branches.
-- Streamed workflow events with final `WorkflowResult` output.
-- Human-review pause and resume through `request_info`.
-- Three human-review choices:
-  - approve escalation
-  - create a standard ticket instead
-  - reject the report
-- Direct escalation when human review is disabled.
-- Strict workflow-state validation for status, route, classification, review fields, approval value, final action, and error fields.
-- Structured JSON logging under the `bug_triage_workflow` logger namespace.
-- Documented exception policy.
-- CLI demonstration in `src/main.py`.
-- Validated scenario runner with automatic outcome checks in `scripts/run_demo_scenario.py`.
-- Automated tests using fakes, stubs, mocks, and deterministic responses.
-- Ten validated demo scenario outputs in `docs/`.
-- Adversarial evaluation for prompt-injection and benign-content robustness, with verified live-eval results.
+*Illustrative abbreviated output — model responses vary.*
+
+```
+Input
+  Users can reset another user's password by changing the account ID in the URL.
+
+Classification
+  category:    security
+  urgency:     critical
+  confidence:  0.95
+
+Classifier recommendation
+  request_human_approval
+
+Deterministic policy route
+  request_human_approval   ← safety override; Python policy, not model output
+
+Human decision
+  approve_escalation
+
+Final outcome
+  create_escalation_ticket
+```
 
 ## Architecture
-
-The implementation is split into small modules with clear responsibilities and follows an IDesign-inspired separation of UI, Manager, Engine, Accessor, Resource, and cross-cutting concerns. These are logical in-process boundaries appropriate to the scope of this project; they are not independently deployed services.
-
-- `src/config.py` loads `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, and `HUMAN_APPROVAL_ENABLED`.
-- `src/preprocess.py` normalizes raw reports, extracts obvious metadata, and detects missing information.
-- `src/classifier.py` builds the classifier prompt and parses OpenAI classifier responses into `TriageClassification`.
-- `src/openai_provider.py` creates the native Microsoft Agent Framework `Agent` backed by `OpenAIChatClient`.
-- `src/router.py` applies deterministic routing policy in `route_triage`.
-- `src/workflow.py` builds the Microsoft Agent Framework workflow in `build_bug_triage_workflow`.
-- `src/human_approval.py` implements `HumanReviewExecutor`, `request_review()`, and human-review response handling.
-- `src/models.py` defines strict Pydantic models, enums, and workflow-state validation.
-- `src/workflow_messages.py` defines internal transport messages between executors.
-- `src/workflow_results.py` builds completed and failed `WorkflowResult` values.
-- `src/workflow_trace.py` maintains the per-run workflow event trace.
-- `src/logging_config.py` configures JSON logging.
-- `src/main.py` provides the sample CLI demo.
-- `scripts/run_demo_scenario.py` runs and validates the ten demo scenarios.
-
-Main data flow:
-
-1. A raw bug report enters `preprocess_executor`.
-2. `preprocess_bug_report` returns a `PreprocessedBugReport`.
-3. `classifier_request_executor` stores the preprocessed report in workflow state and sends an `AgentExecutorRequest`.
-4. The native `classifier_agent` calls the configured OpenAI classifier.
-5. `classifier_response_executor` parses and validates the classifier output.
-6. `router_executor` calls `route_triage`.
-7. The workflow branches to a terminal executor or pauses at `request_human_review_executor`.
-8. A final `WorkflowResult` is emitted and validated by Pydantic.
 
 ```mermaid
 flowchart TB
   subgraph UI["UI"]
-    main_cli["Sample CLI<br/>src/main.py"]
+    main_cli["Bug Report CLI<br/>src/main.py"]
     demo_cli["Demo Runner<br/>scripts/run_demo_scenario.py"]
   end
 
@@ -137,13 +103,118 @@ flowchart TB
   logging -.-> openai_accessor
 ```
 
+## Docker Quick-Start
+
+Docker runs the full workflow without installing Python locally. No pre-built image is published; build from source.
+
+```bash
+cp .env.example .env
+# add LLM_API_KEY to .env
+docker build -t bug-triage-workflow .
+docker compose run --rm bug-triage --file examples/security_bug.txt
+```
+
+Additional input modes:
+
+```bash
+# built-in demo report (demonstrates human-review path)
+docker compose run --rm bug-triage --demo
+
+# inline text
+docker compose run --rm bug-triage --text "The checkout button crashes in Chrome."
+
+# piped stdin — pass -T to disable TTY so piped input flows correctly
+cat examples/security_bug.txt | docker compose run --rm -T bug-triage
+```
+
+**Piped-stdin and human review:** piped stdin consumes the container's standard input, so the same run cannot later accept an interactive review response. Use `--file` or `--text` for reports that may require human review. For a fully non-interactive piped run:
+
+```bash
+cat examples/security_bug.txt | \
+  docker compose run --rm -T \
+  -e HUMAN_APPROVAL_ENABLED=false \
+  bug-triage
+```
+
+When the workflow pauses for human review, Docker's default TTY (`tty: true` in `docker-compose.yml`) supports the interactive prompt. Piped-stdin runs (`-T`) cannot drive that prompt.
+
+`.env` is passed to the container at runtime and is listed in `.dockerignore`; it is never copied into the image.
+
+## Local Python Quick-Start
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp .env.example .env
+# add LLM_API_KEY to .env
+python -m src.main --file examples/security_bug.txt
+```
+
+All four input modes work locally:
+
+```bash
+python -m src.main --demo
+python -m src.main --text "The checkout button crashes in Chrome."
+python -m src.main --file examples/security_bug.txt
+cat examples/security_bug.txt | python -m src.main
+```
+
+**Configuration variables** (`LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `HUMAN_APPROVAL_ENABLED`) are documented in the [Configuration](#configuration) section below.
+
+## Quality Gates
+
+| Gate | Command | CI | Current evidence |
+|---|---|---|---|
+| Deterministic test suite | `python -m pytest` | Yes | 332 passed, 6 skipped |
+| Focused CLI/logging tests | `python -m pytest tests/test_main.py tests/test_logging_config.py -v` | No | 41 passed |
+| Python compilation | `python -m compileall src tests scripts -q` | Not yet | Passed locally |
+| Docker build | `docker build -t bug-triage-workflow .` | Not yet | Passed locally |
+| Docker CLI smoke test | `docker run --rm bug-triage-workflow --help` | Not yet | Passed locally |
+| Docker non-root check | `docker run --rm --entrypoint id bug-triage-workflow` | Not yet | uid=1000(appuser) |
+| Live adversarial evaluations | `python -m pytest tests/eval -m eval --run-evals -v` | No, opt-in | 6 passed |
+| Secret and tracked-file audit | Documented release-audit commands below | No | Passed locally; reverify before public release |
+
+The GitHub Actions workflow (`.github/workflows/tests.yml`) installs dependencies on Python 3.12 and runs `python -m pytest` (deterministic suite only).
+
+## Core Engineering Decisions
+
+- **LLM classification, Python routing** — natural-language bug reports vary in wording, detail, tone, and severity, making LLM classification the right fit. Routing remains deterministic so risky decisions are controlled by auditable Python policy, not by model output alone.
+- **Safety overrides before confidence** — risk-based routing (security, data-loss, critical, or high-emotion/high-urgency) takes precedence over everything else, including classifier confidence and missing-information checks.
+- **Confidence threshold as an explicit policy gate** — `route_triage` reads `TriageClassification.confidence` directly. A score below 0.70 routes to human review. This is not a claim that model confidence is perfectly calibrated; it is a policy gate.
+- **Structured failure over silent crash** — malformed classifier output becomes `WorkflowResult(status=failed)`. Unexpected faults (provider errors, router errors, invariant failures) propagate to the caller so defects are not hidden.
+- **Automated tests use fakes** — live OpenAI calls add cost, latency, external availability risk, and nondeterminism. Real OpenAI behavior is demonstrated through validated demo outputs and opt-in live evaluations.
+- **`report_rejected` is distinct from `completed`** — rejection is a terminal business outcome, not a completed ticket-handling action.
+- **IDesign logical boundaries in one process** — separately deployed microservices would add unnecessary operational complexity for this scope. The architecture is intended to show where those boundaries would live in a production system.
+
+---
+
+## Detailed Architecture and Workflow Documentation
+
 ### IDesign Architecture Alignment
 
-The project applies the IDesign principles used in the course at a scale appropriate for a single-process Python workflow:
+The implementation is split into small modules with clear responsibilities and follows an IDesign-inspired separation of UI, Manager, Engine, Accessor, Resource, and cross-cutting concerns. These are logical in-process boundaries appropriate to the scope of this project; they are not independently deployed services.
+
+- `src/config.py` loads `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, and `HUMAN_APPROVAL_ENABLED`.
+- `src/preprocess.py` normalizes raw reports, extracts obvious metadata, and detects missing information.
+- `src/classifier.py` builds the classifier prompt and parses OpenAI classifier responses into `TriageClassification`.
+- `src/openai_provider.py` creates the native Microsoft Agent Framework `Agent` backed by `OpenAIChatClient`.
+- `src/router.py` applies deterministic routing policy in `route_triage`.
+- `src/workflow.py` builds the Microsoft Agent Framework workflow in `build_bug_triage_workflow`.
+- `src/human_approval.py` implements `HumanReviewExecutor`, `request_review()`, and human-review response handling.
+- `src/models.py` defines strict Pydantic models, enums, and workflow-state validation.
+- `src/workflow_messages.py` defines internal transport messages between executors.
+- `src/workflow_results.py` builds completed and failed `WorkflowResult` values.
+- `src/workflow_trace.py` maintains the per-run workflow event trace.
+- `src/logging_config.py` configures JSON logging.
+- `src/main.py` provides the CLI, supporting `--demo`, `--text`, `--file`, and piped stdin input.
+- `scripts/run_demo_scenario.py` runs and validates the ten demo scenarios.
+
+The project applies the IDesign principles at a scale appropriate for a single-process Python workflow:
 
 - **UI:** `src/main.py` and `scripts/run_demo_scenario.py` initiate user stories and present workflow output. They do not own classification or routing policy.
-- **Manager:** `src/workflow.py` acts as the Bug Triage Workflow Manager. It coordinates the end-to-end user story, delegates work to focused components, handles branching, and owns orchestration rather than external-resource details.
-- **Engines:** preprocessing, classification parsing, deterministic routing, human-review handling, terminal-action construction, and state validation are separated into focused processing components. These components change for different business reasons and expose typed contracts.
+- **Manager:** `src/workflow.py` coordinates the end-to-end user story, delegates work to focused components, handles branching, and owns orchestration rather than external-resource details.
+- **Engines:** preprocessing, classification parsing, deterministic routing, human-review handling, terminal-action construction, and state validation are separated into focused processing components.
 - **Accessor:** the OpenAI classifier Accessor boundary consists of the injected `classifier_agent`, its `OpenAIChatClient`, and the construction logic in `src/openai_provider.py`. Business routing and workflow orchestration do not depend on OpenAI client details.
 - **Resource:** the current external resource is the OpenAI API. A production version would add separate accessors for a ticketing system, durable workflow storage, reviewer identity, notifications, and audit storage.
 - **Cross-cutting concerns:** configuration, JSON logging, validation, and exception policy are kept separate from the core business flow.
@@ -156,18 +227,7 @@ UI -> Workflow Manager -> Engines -> Accessors -> Resources
 
 The CLI also acts as the composition root: it loads configuration, constructs the OpenAI-backed classifier dependency, and injects that dependency into the Workflow Manager before execution begins.
 
-This structure supports the following IDesign goals:
-
-- **Clear component boundaries:** each module has a focused responsibility and a typed interface.
-- **Volatility-based separation:** model/provider changes, routing-policy changes, review-policy changes, and external-ticketing changes are isolated from one another where practical.
-- **No tunneling:** engines do not reach through unrelated layers to call external resources; the workflow manager coordinates the business flow explicitly.
-- **Deterministic policy ownership:** the LLM classifies and recommends, while auditable Python policy selects the route.
-- **Context-aware design:** the project keeps these boundaries in one deployable process because separate network services would add unnecessary complexity for the assignment scope.
-- **Realization and validation:** the automated tests and ten validated demo scenarios realize the significant user stories and verify each route, review decision, state transition, and expected failure path.
-
-The current implementation therefore follows IDesign as a logical component architecture. It does not claim to be a complete production HLD with independently deployed services, durable resources, or production accessors.
-
-## Workflow Routes and Human Review
+### Workflow Routes and Human Review
 
 The route names are defined by `RouteName`:
 
@@ -183,28 +243,14 @@ There are three related routing concepts:
 - Deterministic policy route: the route selected by `route_triage`.
 - Effective final route: the terminal route recorded in the final `WorkflowResult`.
 
-The deterministic router can override the classifier recommendation. Routing
-precedence is applied in the following order:
+The deterministic router can override the classifier recommendation. Routing precedence is applied in the following order:
 
-1. Risky security, data-loss, critical, or high-emotion/high-urgency reports
-   route to `request_human_approval`.
+1. Risky security, data-loss, critical, or high-emotion/high-urgency reports route to `request_human_approval`.
 2. Missing information routes to `request_more_info`.
-3. A classifier confidence score below `LOW_CONFIDENCE_HUMAN_REVIEW_THRESHOLD`
-   (0.70) routes to `request_human_approval`. A score of exactly 0.70 is not
-   considered low confidence and does not trigger this rule.
+3. A classifier confidence score below `LOW_CONFIDENCE_HUMAN_REVIEW_THRESHOLD` (0.70) routes to `request_human_approval`. A score of exactly 0.70 is not considered low confidence and does not trigger this rule.
 4. All remaining reports route to `create_standard_ticket`.
 
-Classifier confidence is an explicit deterministic routing signal: `route_triage`
-reads `TriageClassification.confidence` directly. This is not a claim that
-model confidence is perfectly calibrated or that the threshold is
-production-validated; it is a policy gate that routes uncertain classifications
-to a human reviewer.
-
-When human review is disabled, a policy route of `request_human_approval` is
-handled by `create_direct_escalation_ticket_executor` regardless of what
-triggered that route — including low-confidence cases. In that case, the
-routed event can preserve the policy route while the final result records the
-effective route `create_escalation_ticket`.
+When human review is disabled, a policy route of `request_human_approval` is handled by `create_direct_escalation_ticket_executor` regardless of what triggered that route — including low-confidence cases. In that case, the routed event can preserve the policy route while the final result records the effective route `create_escalation_ticket`.
 
 ```mermaid
 flowchart TD
@@ -230,11 +276,7 @@ flowchart TD
   reject --> effective_rejection["effective route: log_rejection"]
 ```
 
-Human review is implemented by `HumanReviewExecutor` with executor ID
-`request_human_review_executor`. The workflow emits an awaiting-review
-`WorkflowResult`, then calls Microsoft Agent Framework `request_info` with a
-typed `HumanReviewRequest`. The CLI and demo runner resume the workflow by
-supplying a `HumanReviewDecision`.
+Human review is implemented by `HumanReviewExecutor` with executor ID `request_human_review_executor`. The workflow emits an awaiting-review `WorkflowResult`, then calls Microsoft Agent Framework `request_info` with a typed `HumanReviewRequest`. The CLI and demo runner resume the workflow by supplying a `HumanReviewDecision`.
 
 Reviewer decisions and outcomes:
 
@@ -242,12 +284,7 @@ Reviewer decisions and outcomes:
 - `create_standard_ticket` routes to `create_standard_ticket_executor`.
 - `reject_report` routes to `log_rejection_executor`.
 
-Relevant statuses:
-
-- `awaiting_human_review`: the workflow is paused for human review.
-- `escalation_approved`: the reviewer approved escalation.
-- `standard_ticket_selected`: the reviewer selected standard-ticket handling instead of escalation.
-- `report_rejected`: the reviewer rejected the report.
+Relevant statuses: `awaiting_human_review`, `escalation_approved`, `standard_ticket_selected`, `report_rejected`.
 
 Human-review fields:
 
@@ -255,11 +292,9 @@ Human-review fields:
 - `human_review_action`: the selected `HumanReviewAction`, or `null` when no review action applies.
 - `approval_granted`: `true` for approved escalation, `false` for rejection, and `null` for standard-ticket override or no review.
 
-## Workflow Status Semantics
+### Workflow Status Semantics
 
-`WorkflowResult.status` describes whether and how the workflow terminated.
-`selected_route` describes the business outcome selected. `final_action`
-describes the terminal action produced, when there is one.
+`WorkflowResult.status` describes whether and how the workflow terminated. `selected_route` describes the business outcome selected. `final_action` describes the terminal action produced, when there is one.
 
 - `completed` means the workflow successfully executed its selected terminal action. It does not always mean a bug ticket was created.
 - `completed` plus `request_more_info` means the workflow successfully decided to request more information.
@@ -268,11 +303,9 @@ describes the terminal action produced, when there is one.
 - `report_rejected` is a distinct terminal business outcome for human rejection.
 - `failed` means validation or processing could not complete successfully.
 
-## State Model
+### State Model
 
-The state model is enforced by strict Pydantic validation in `WorkflowResult`.
-Invalid combinations of workflow status, selected route, classification, review
-fields, approval value, final action, and error are rejected.
+The state model is enforced by strict Pydantic validation in `WorkflowResult`. Invalid combinations of workflow status, selected route, classification, review fields, approval value, final action, and error are rejected.
 
 Representative valid progressions:
 
@@ -306,18 +339,107 @@ stateDiagram-v2
   failed --> [*]
 ```
 
+---
+
+## Testing
+
+Run the full automated test suite:
+
+```bash
+python -m pytest
+```
+
+Current verified result: **332 passed, 6 skipped**
+
+The automated tests use fakes, stubs, mocks, and deterministic responses. The default suite does not call OpenAI, which keeps it fast, repeatable, inexpensive, and safe for CI. Real OpenAI behavior is demonstrated through the validated demo outputs and opt-in live evaluations.
+
+### Live Adversarial Evaluations
+
+An opt-in live-eval suite exercises the real OpenAI-backed classifier against adversarial inputs:
+
+```bash
+python -m pytest tests/eval -m eval --run-evals -v
+```
+
+The `-m eval` flag selects tests carrying the `eval` marker. The `--run-evals` flag explicitly authorizes their execution; without it the eval tests are skipped even when selected by `-m eval`. Live evals require a valid OpenAI API configuration and incur API usage. They are intentionally excluded from the default `python -m pytest` run to keep the default suite deterministic and free of external dependencies.
+
+Verified live-eval result using `gpt-4.1-mini`: **6 passed**
+
+## Demo Evidence
+
+Run a validated scenario:
+
+```bash
+python scripts/run_demo_scenario.py <scenario>
+```
+
+Supported scenario names: `standard-ticket`, `request-more-info`, `escalation-approved`, `standard-ticket-selected`, `report-rejected`, `direct-escalation`, `classifier-failure`, `adversarial-security`, `adversarial-benign-quote`, `low-confidence-review`.
+
+Scenarios `standard-ticket` through `direct-escalation` and both `adversarial-*` scenarios use the real OpenAI-backed classifier. `classifier-failure` and `low-confidence-review` use deterministic fake classifier responses and do not call OpenAI.
+
+To capture output:
+
+```bash
+PYTHONWARNINGS=ignore python scripts/run_demo_scenario.py standard-ticket \
+  2>&1 | tee docs/demo_01_standard_ticket.txt
+```
+
+Validated scenario outputs:
+
+- [docs/demo_01_standard_ticket.txt](docs/demo_01_standard_ticket.txt): ordinary complete report reaches standard-ticket handling.
+- [docs/demo_02_request_more_info.txt](docs/demo_02_request_more_info.txt): incomplete report produces a request-information outcome.
+- [docs/demo_03_escalation_approved.txt](docs/demo_03_escalation_approved.txt): workflow pauses, resumes, and creates escalation handling.
+- [docs/demo_04_standard_ticket_selected.txt](docs/demo_04_standard_ticket_selected.txt): reviewer overrides escalation and selects standard-ticket handling.
+- [docs/demo_05_report_rejected.txt](docs/demo_05_report_rejected.txt): reviewer rejects the report.
+- [docs/demo_06_direct_escalation_review_disabled.txt](docs/demo_06_direct_escalation_review_disabled.txt): review-disabled configuration bypasses the human-review pause.
+- [docs/demo_07_classifier_output_failure.txt](docs/demo_07_classifier_output_failure.txt): malformed classifier output becomes a structured failed result.
+- [docs/demo_08_adversarial_security.txt](docs/demo_08_adversarial_security.txt): adversarial report embedding prompt-injection instructions is correctly classified as a security issue and routed for human approval.
+- [docs/demo_09_adversarial_benign_quote.txt](docs/demo_09_adversarial_benign_quote.txt): benign report quoting adversarial-style text is correctly classified as a UI bug and routed to a standard ticket.
+- [docs/demo_10_low_confidence_review.txt](docs/demo_10_low_confidence_review.txt): deterministic fake classifier emits a complete UI_BUG classification with confidence 0.60, triggering the low-confidence human-review route; the reviewer selects standard-ticket handling. Does not call OpenAI.
+
+## Logging
+
+`src/logging_config.py` configures a JSON logger named `bug_triage_workflow`. Child loggers include modules such as `bug_triage_workflow.preprocess`, `bug_triage_workflow.classifier`, `bug_triage_workflow.router`, and `bug_triage_workflow.openai_provider`.
+
+Log entries include `timestamp`, `level`, `logger`, `message`, optional `extra` fields, and optional formatted exception text. Workflow and executor context is included where applicable. Examples include `executor`, `selected_route`, `recommended_route`, `category`, `urgency`, `sentiment`, `missing_info_count`, and `extracted_field_names`.
+
+The provider logs the model name, but not the API key. Tests verify that API keys are not written to provider logs.
+
+**Provider failure handling:** when a provider error occurs, the CLI prints a normalized safe message to the terminal; full exception details are written to a dedicated diagnostic logger that does not propagate to the main application log. Diagnostic output goes to a process-specific file in the OS temporary directory by default, restricted to mode 0600 with bounded log rotation. The path can be overridden with the `BUG_TRIAGE_DIAGNOSTIC_LOG` environment variable. If the diagnostic file cannot be initialized, the CLI starts normally without it.
+
+## Security and Repository Hygiene
+
+Implemented safeguards:
+
+- `.env` is ignored by Git. No credentials are committed.
+- The workflow uses strict input and output models.
+- CLI error messages avoid exposing internal exception details for unexpected failures.
+- Secret scanning was performed on tracked files. Local-path scanning was performed on tracked files. Demo outputs were sanitized.
+- A secret-shaped test fixture is split as `"sk-" + "demo-secret-should-not-print"` to avoid false-positive repository scans.
+- The classifier prompt includes a trust-boundary instruction that instructs the model to treat all user-supplied text as untrusted data and to ignore embedded instructions.
+- Adversarial evaluations (`tests/eval/`) verify that prompt-injection attempts in bug reports are handled correctly and that benign reports quoting adversarial-style text are not mis-classified. Six live-eval cases passed using `gpt-4.1-mini`.
+
+These are implementation safeguards and evaluations for this project. They are not a formal security audit or a production security guarantee. Additional production hardening is listed under Next Steps for Production Readiness.
+
+Release-audit commands (run before any public release; reverify each time):
+
+```bash
+git secrets --scan               # or: truffleHog / gitleaks
+grep -rE 'sk-[A-Za-z0-9]{20,}' .
+grep -rE '/Users/|/home/' docs/ scripts/ src/ tests/
+```
+
 ## Exception Policy
+
 Expected validation failures become structured workflow results:
 
 ```text
 WorkflowResult(status=failed)
 ```
 
-This includes invalid or blank input rejected during preprocessing and malformed
-or schema-invalid classifier output rejected during classifier-response parsing.
+This includes invalid or blank input rejected during preprocessing and malformed or schema-invalid classifier output rejected during classifier-response parsing.
 
-Unexpected exceptions propagate to the caller. They are not converted into
-`WorkflowResult(status=failed)`. Propagated exceptions include:
+Unexpected exceptions propagate to the caller. They are not converted into `WorkflowResult(status=failed)`. Propagated exceptions include:
 
 - OpenAI or provider failures
 - router failures
@@ -326,9 +448,25 @@ Unexpected exceptions propagate to the caller. They are not converted into
 - invariant failures
 - programming defects
 
-The CLI boundary logs propagated unexpected exceptions, prints a safe
-user-facing message, and returns a nonzero exit code. It does not expose raw
-tracebacks for expected operational errors.
+The CLI boundary logs propagated unexpected exceptions, prints a safe user-facing message, and returns a nonzero exit code. It does not expose raw tracebacks for expected operational errors.
+
+## Configuration
+
+Supported configuration variables:
+
+- `LLM_PROVIDER`: must be `openai`.
+- `LLM_API_KEY`: required for real OpenAI-backed classifier runs.
+- `LLM_MODEL`: defaults to `gpt-4.1-mini` when unset.
+- `HUMAN_APPROVAL_ENABLED`: accepts boolean-like values such as `true`, `false`, `yes`, `no`, `1`, or `0`; defaults to `true`.
+
+`.env` is listed in `.gitignore` and is not tracked by Git.
+
+CLI exit codes implemented in `src/main.py`:
+
+- `0`: success
+- `2`: configuration validation problem or invalid / missing input
+- `1`: provider error, EOF while waiting for input, or unexpected runtime failure
+- `130`: keyboard interruption
 
 ## Project Structure
 
@@ -389,328 +527,6 @@ tracebacks for expected operational errors.
     ├── test_router.py
     └── test_workflow.py
 ```
-
-## Docker Quick-Start
-
-Docker lets you run the workflow without installing Python locally. The image
-is built from the local source; no pre-built image is published.
-
-**1. Copy the example environment file and add your API key:**
-
-```bash
-cp .env.example .env
-# then open .env and set LLM_API_KEY=your-openai-api-key
-```
-
-`.env` is passed to the container at runtime. It is listed in `.dockerignore`
-and is never copied into the image.
-
-**2. Build the image:**
-
-```bash
-docker build -t bug-triage-workflow .
-```
-
-**3. Run the built-in demo report:**
-
-```bash
-docker compose run --rm bug-triage --demo
-```
-
-
-**4. Run with inline text:**
-
-```bash
-docker compose run --rm bug-triage --text "The checkout button crashes in Chrome."
-```
-
-**5. Run with a file:**
-
-```bash
-docker compose run --rm bug-triage --file examples/security_bug.txt
-```
-
-**6. Run with piped stdin:**
-
-Pass `-T` to disable TTY allocation so Docker does not hold the pseudo-terminal
-and piped input flows correctly:
-
-```bash
-cat examples/security_bug.txt | docker compose run --rm -T bug-triage
-```
-
-Piped stdin consumes the container's standard input. Because of that, the same
-run cannot later accept an interactive human-review response. For reports that
-may require human review, use `--file` or `--text` instead. For a fully
-non-interactive piped run, disable human review explicitly:
-
-```bash
-cat examples/security_bug.txt | \
-  docker compose run --rm -T \
-  -e HUMAN_APPROVAL_ENABLED=false \
-  bug-triage
-```
-
-**Interactive human review:**
-
-When the workflow pauses for human review, the terminal prompts for one of
-three choices. This requires a TTY, which `docker compose run` allocates by
-default (`tty: true` in `docker-compose.yml`). Piped-stdin runs (`-T`) cannot
-drive the interactive prompt; use `--demo`, `--text`, or `--file` for
-interactive review paths, or set `HUMAN_APPROVAL_ENABLED=false` to bypass the
-pause.
-
-## Prerequisites
-
-- Python 3.12, as used by the GitHub Actions workflow and local verification.
-- An OpenAI API key for real classifier runs.
-- A virtual environment is recommended.
-
-## Installation
-
-From the project root:
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
-```
-
-## Configuration
-
-Create a local environment file:
-
-```bash
-cp .env.example .env
-```
-
-Then set the OpenAI API key in `.env`:
-
-```text
-LLM_API_KEY=your-openai-api-key
-```
-
-Supported configuration variables:
-
-- `LLM_PROVIDER`: must be `openai`.
-- `LLM_API_KEY`: required for real OpenAI-backed classifier runs.
-- `LLM_MODEL`: defaults to `gpt-4.1-mini` when unset.
-- `HUMAN_APPROVAL_ENABLED`: accepts boolean-like values such as `true`, `false`, `yes`, `no`, `1`, or `0`; defaults to `true`.
-
-`.env` is listed in `.gitignore` and is not tracked by Git.
-
-## Running the Application
-
-`src/main.py` accepts a bug report from four mutually exclusive sources.
-
-**Built-in sample report** (demonstrates the human-review path):
-
-```bash
-python -m src.main --demo
-```
-
-**Inline text:**
-
-```bash
-python -m src.main --text "The checkout button crashes in Chrome."
-```
-
-**File:**
-
-```bash
-python -m src.main --file examples/security_bug.txt
-```
-
-**Piped stdin:**
-
-```bash
-cat examples/security_bug.txt | python -m src.main
-```
-
-Running `python -m src.main` without any option or piped input prints a usage
-error and exits with code 2.
-
-If the workflow pauses for human review, the CLI prompts for one of three choices:
-
-```text
-1. Approve escalation
-2. Create a standard ticket instead
-3. Reject the report
-```
-
-The reviewer then provides an approver name and optional notes. The workflow
-resumes with the typed `HumanReviewDecision`.
-
-CLI exit codes implemented in `src/main.py`:
-
-- `0`: success
-- `2`: configuration validation problem or invalid / missing input
-- `1`: provider error, EOF while waiting for input, or unexpected runtime failure
-- `130`: keyboard interruption
-
-## Running Tests
-
-Run the full automated test suite:
-
-```bash
-python -m pytest
-```
-
-Current verified result:
-
-```text
-309 passed, 6 skipped
-```
-
-The automated tests use fakes, stubs, mocks, and deterministic responses. The
-default suite does not call OpenAI, which keeps it fast, repeatable,
-inexpensive, and safe for CI. Real OpenAI behavior is demonstrated through the
-OpenAI-backed demo outputs and opt-in live evaluations; deterministic scenarios
-cover controlled failure and low-confidence paths.
-
-### Live Adversarial Evaluations
-
-An opt-in live-eval suite exercises the real OpenAI-backed classifier against
-adversarial inputs:
-
-```bash
-python -m pytest tests/eval -m eval --run-evals -v
-```
-
-The `-m eval` flag selects tests carrying the `eval` marker. The `--run-evals`
-flag explicitly authorizes their execution; without it the eval tests are
-skipped even when selected by `-m eval`. Live evals also require a valid OpenAI
-API configuration and incur API usage. They are intentionally excluded from the
-default `python -m pytest` run to keep the default suite deterministic and free
-of external dependencies. Live evals supplement rather than replace the
-deterministic tests.
-
-Verified live-eval result using `gpt-4.1-mini`:
-
-```text
-6 passed
-```
-
-The current GitHub Actions workflow in `.github/workflows/tests.yml` installs
-dependencies on Python 3.12 and runs `python -m pytest` (deterministic suite
-only).
-
-## Running Demo Scenarios
-
-Run a validated scenario:
-
-```bash
-python scripts/run_demo_scenario.py <scenario>
-```
-
-Supported scenario names:
-
-- `standard-ticket`
-- `request-more-info`
-- `escalation-approved`
-- `standard-ticket-selected`
-- `report-rejected`
-- `direct-escalation`
-- `classifier-failure`
-- `adversarial-security`
-- `adversarial-benign-quote`
-- `low-confidence-review`
-
-Scenarios `standard-ticket` through `direct-escalation` and both
-`adversarial-*` scenarios use the configured real OpenAI-backed classifier.
-`classifier-failure` and `low-confidence-review` use deterministic fake
-classifier responses and do not call OpenAI. The `low-confidence-review`
-scenario emits a complete, safe UI_BUG classification with confidence 0.60,
-which routes the report to human review; the demo reviewer selects
-`CREATE_STANDARD_TICKET`.
-
-Each successful scenario prints:
-
-```text
-DEMO VALIDATION PASSED
-```
-
-To capture output:
-
-```bash
-PYTHONWARNINGS=ignore python scripts/run_demo_scenario.py standard-ticket \
-  2>&1 | tee docs/demo_01_standard_ticket.txt
-```
-
-Rerunning a command with the same `tee` target overwrites the file unless
-`tee -a` is used.
-
-## Demo Evidence
-
-- [docs/demo_01_standard_ticket.txt](docs/demo_01_standard_ticket.txt): ordinary complete report reaches standard-ticket handling.
-- [docs/demo_02_request_more_info.txt](docs/demo_02_request_more_info.txt): incomplete report produces a request-information outcome.
-- [docs/demo_03_escalation_approved.txt](docs/demo_03_escalation_approved.txt): workflow pauses, resumes, and creates escalation handling.
-- [docs/demo_04_standard_ticket_selected.txt](docs/demo_04_standard_ticket_selected.txt): reviewer overrides escalation and selects standard-ticket handling.
-- [docs/demo_05_report_rejected.txt](docs/demo_05_report_rejected.txt): reviewer rejects the report.
-- [docs/demo_06_direct_escalation_review_disabled.txt](docs/demo_06_direct_escalation_review_disabled.txt): review-disabled configuration bypasses the human-review pause.
-- [docs/demo_07_classifier_output_failure.txt](docs/demo_07_classifier_output_failure.txt): malformed classifier output becomes a structured failed result.
-- [docs/demo_08_adversarial_security.txt](docs/demo_08_adversarial_security.txt): adversarial report embedding prompt-injection instructions is correctly classified as a security issue and routed for human approval.
-- [docs/demo_09_adversarial_benign_quote.txt](docs/demo_09_adversarial_benign_quote.txt): benign report quoting adversarial-style text is correctly classified as a UI bug and routed to a standard ticket.
-- [docs/demo_10_low_confidence_review.txt](docs/demo_10_low_confidence_review.txt): deterministic fake classifier emits a complete UI_BUG classification with confidence 0.60, triggering the low-confidence human-review route; the reviewer selects standard-ticket handling. Does not call OpenAI.
-
-## Logging
-
-`src/logging_config.py` configures a JSON logger named `bug_triage_workflow`.
-Child loggers include modules such as `bug_triage_workflow.preprocess`,
-`bug_triage_workflow.classifier`, `bug_triage_workflow.router`, and
-`bug_triage_workflow.openai_provider`.
-
-Log entries include:
-
-- `timestamp`
-- `level`
-- `logger`
-- `message`
-- optional `extra` fields
-- optional formatted exception text
-
-Workflow and executor context is included where applicable. Examples include
-`executor`, `selected_route`, `recommended_route`, `category`, `urgency`,
-`sentiment`, `missing_info_count`, and `extracted_field_names`.
-
-The provider logs the model name, but not the API key. Tests verify that API
-keys are not written to provider logs. CLI boundaries use safe user-facing
-messages for unexpected errors while logging exception details through the
-configured application logger.
-
-## Security and Repository Hygiene
-
-Implemented safeguards:
-
-- `.env` is ignored by Git.
-- No credentials are committed.
-- The workflow uses strict input and output models.
-- CLI error messages avoid exposing internal exception details for unexpected failures.
-- Secret scanning was performed on tracked files.
-- Local-path scanning was performed on tracked files.
-- Demo outputs were sanitized before submission.
-- A secret-shaped test fixture is split as `"sk-" + "demo-secret-should-not-print"` to avoid false-positive repository scans.
-- The classifier prompt includes a trust-boundary instruction that instructs the model to treat all user-supplied text as untrusted data and to ignore embedded instructions.
-- Adversarial evaluations (`tests/eval/`) verify that prompt-injection attempts in bug reports are handled correctly and that benign reports quoting adversarial-style text are not mis-classified. Six live-eval cases passed using `gpt-4.1-mini`.
-
-These are implementation safeguards and evaluations for this project. They are
-not a formal security audit or a production security guarantee. Additional
-production hardening is listed under Next Steps for Production Readiness.
-
-## Design Decisions
-
-- Classification is LLM-backed because natural-language bug reports vary in wording, detail, tone, and severity.
-- Routing remains deterministic so risky decisions are controlled by auditable Python policy rather than by model output alone.
-- Escalation can require human review because security, data-loss, critical, or high-emotion/high-urgency cases should not be escalated blindly.
-- Automated tests use fakes because live OpenAI calls add cost, latency, external availability risk, rate limits, and nondeterministic model output.
-- `report_rejected` is distinct from `completed` because rejection is a terminal business outcome, not a completed ticket-handling action.
-- Malformed classifier output becomes a structured failure because it is an expected validation boundary.
-- Unexpected provider, router, terminal-executor, framework, invariant, or programming faults propagate so defects and infrastructure failures are not silently hidden.
-- Policy route and effective route can differ when human review is disabled or when a reviewer overrides escalation.
-- The workflow is organized around an IDesign-style Manager that orchestrates focused Engines rather than placing all behavior in one agent or function.
-- The injected `classifier_agent`, `OpenAIChatClient`, and `src/openai_provider.py` together form the OpenAI Accessor boundary, keeping provider-specific details out of routing policy and terminal business behavior.
-- The boundaries are logical and in-process because the assignment does not justify the operational complexity of independently deployed microservices.
 
 ## Known Limitations
 
@@ -833,16 +649,3 @@ Product integration:
 - Add escalation queues and assignment rules.
 - Add a feedback loop from resolved tickets.
 - Add analytics for classifier and routing quality.
-
-## Submission Verification
-
-Repository evidence supports the following:
-
-- Ten demo scenarios were validated, including two adversarial scenarios and one deterministic low-confidence-review scenario.
-- The full deterministic automated suite passed with `309 passed, 6 skipped`.
-- Live adversarial evaluations passed with `6 passed` using `gpt-4.1-mini`.
-- Source, scripts, and test compilation succeeded.
-- `.env` is not tracked.
-- No committed secrets were found.
-- No local filesystem paths remain in tracked artifacts.
-- Demo files were sanitized.
