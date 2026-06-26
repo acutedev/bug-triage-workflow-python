@@ -20,6 +20,8 @@ from src.models import (
 
 logger = get_logger("router")
 
+LOW_CONFIDENCE_HUMAN_REVIEW_THRESHOLD = 0.70
+
 _RISKY_CATEGORIES = {BugCategory.SECURITY, BugCategory.DATA_LOSS}
 _HIGH_RISK_URGENCIES = {Urgency.HIGH, Urgency.CRITICAL}
 _HIGH_EMOTION_SENTIMENTS = {Sentiment.FRUSTRATED, Sentiment.ANGRY}
@@ -33,6 +35,11 @@ def _has_missing_information(
     if preprocessed_report and preprocessed_report.has_obvious_missing_info:
         return True
     return bool(classification.missing_info)
+
+
+def _is_low_confidence(classification: TriageClassification) -> bool:
+    """Return whether the classification confidence is below the review threshold."""
+    return classification.confidence < LOW_CONFIDENCE_HUMAN_REVIEW_THRESHOLD
 
 
 def _requires_human_review(classification: TriageClassification) -> bool:
@@ -59,9 +66,10 @@ def route_triage(
     """Select the next route for a classified bug report.
 
     Routing priority:
-    1. Risky/security/data-loss/critical cases require human review.
-    2. Missing information requests clarification.
-    3. Everything else becomes a standard ticket.
+    1. Risky/security/data-loss/critical cases → REQUEST_HUMAN_APPROVAL.
+    2. Missing information → REQUEST_MORE_INFO.
+    3. Confidence below LOW_CONFIDENCE_HUMAN_REVIEW_THRESHOLD → REQUEST_HUMAN_APPROVAL.
+    4. Everything else → CREATE_STANDARD_TICKET.
 
     Args:
         classification: Validated LLM classification.
@@ -80,6 +88,15 @@ def route_triage(
         decision = RouteDecision(
             selected_route=RouteName.REQUEST_MORE_INFO,
             reason="Important bug report details are missing.",
+        )
+    elif _is_low_confidence(classification):
+        decision = RouteDecision(
+            selected_route=RouteName.REQUEST_HUMAN_APPROVAL,
+            reason=(
+                f"Classifier confidence {classification.confidence:.2f} is below "
+                f"the {LOW_CONFIDENCE_HUMAN_REVIEW_THRESHOLD:.2f} threshold; "
+                "human review required."
+            ),
         )
     else:
         decision = RouteDecision(

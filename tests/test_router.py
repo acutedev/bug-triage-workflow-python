@@ -22,6 +22,7 @@ def make_classification(
     sentiment: Sentiment = Sentiment.NEUTRAL,
     missing_info: list[str] | None = None,
     recommended_route: RouteName = RouteName.CREATE_STANDARD_TICKET,
+    confidence: float = 0.9,
 ) -> TriageClassification:
     return TriageClassification(
         category=category,
@@ -30,7 +31,7 @@ def make_classification(
         missing_info=missing_info or [],
         recommended_route=recommended_route,
         reasoning="Validated classification for router testing.",
-        confidence=0.9,
+        confidence=confidence,
     )
 
 
@@ -276,3 +277,96 @@ def test_route_triage_logs_warning_when_llm_recommendation_is_overridden(caplog)
         and record.recommended_route == RouteName.CREATE_STANDARD_TICKET.value
         for record in caplog.records
     )
+
+
+# Low-confidence routing tests
+
+
+def test_confidence_below_threshold_routes_to_human_approval():
+    classification = make_classification(confidence=0.69)
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+
+
+def test_confidence_at_threshold_routes_to_standard_ticket():
+    classification = make_classification(confidence=0.70)
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.CREATE_STANDARD_TICKET
+
+
+def test_confidence_above_threshold_routes_to_standard_ticket():
+    classification = make_classification(confidence=0.71)
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.CREATE_STANDARD_TICKET
+
+
+def test_low_confidence_with_preprocessed_missing_info_routes_to_request_more_info():
+    classification = make_classification(confidence=0.69)
+    preprocessed_report = make_preprocessed_report(has_missing_info=True)
+
+    decision = route_triage(classification, preprocessed_report)
+
+    assert decision.selected_route == RouteName.REQUEST_MORE_INFO
+
+
+def test_low_confidence_with_classifier_missing_info_routes_to_request_more_info():
+    classification = make_classification(
+        confidence=0.69,
+        missing_info=["browser"],
+    )
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.REQUEST_MORE_INFO
+
+
+def test_risky_category_at_high_confidence_still_requires_human_review():
+    classification = make_classification(
+        category=BugCategory.SECURITY,
+        confidence=0.95,
+    )
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+
+
+def test_safe_high_confidence_report_routes_to_standard_ticket():
+    classification = make_classification(
+        category=BugCategory.UI_BUG,
+        urgency=Urgency.LOW,
+        sentiment=Sentiment.NEUTRAL,
+        confidence=0.95,
+    )
+    preprocessed_report = make_preprocessed_report(has_missing_info=False)
+
+    decision = route_triage(classification, preprocessed_report)
+
+    assert decision.selected_route == RouteName.CREATE_STANDARD_TICKET
+
+
+def test_low_confidence_overrides_classifier_recommendation_of_standard_ticket():
+    classification = make_classification(
+        confidence=0.69,
+        recommended_route=RouteName.CREATE_STANDARD_TICKET,
+    )
+
+    decision = route_triage(classification)
+
+    assert decision.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+
+
+def test_low_confidence_route_reason_contains_confidence_and_threshold():
+    classification = make_classification(confidence=0.69)
+
+    decision = route_triage(classification)
+
+    assert decision.reason is not None
+    assert "0.69" in decision.reason
+    assert "0.70" in decision.reason

@@ -41,6 +41,7 @@ def make_llm_response(
     sentiment: Sentiment = Sentiment.NEUTRAL,
     missing_info: list[str] | None = None,
     recommended_route: RouteName = RouteName.CREATE_STANDARD_TICKET,
+    confidence: float = 0.9,
 ) -> dict[str, object]:
     return {
         "category": category.value,
@@ -49,7 +50,7 @@ def make_llm_response(
         "missing_info": missing_info or [],
         "recommended_route": recommended_route.value,
         "reasoning": "Validated classification for workflow integration testing.",
-        "confidence": 0.9,
+        "confidence": confidence,
     }
 
 
@@ -1188,6 +1189,134 @@ def test_incomplete_report_routes_to_request_more_info_despite_classifier_suppre
     # Preprocessor flags obvious missing info; router overrides to REQUEST_MORE_INFO.
     assert result.status == WorkflowStatus.COMPLETED
     assert result.selected_route == RouteName.REQUEST_MORE_INFO
+
+
+# ---------------------------------------------------------------------------
+# Low-confidence routing workflow tests
+#
+# A safe, complete, non-risky classification with confidence below 0.70 must
+# follow the existing REQUEST_HUMAN_APPROVAL path — reaching AWAITING_HUMAN_REVIEW
+# when human approval is enabled, and the direct-escalation fallback when disabled.
+# ---------------------------------------------------------------------------
+
+
+def test_low_confidence_safe_report_pauses_at_awaiting_human_review_when_approval_enabled():
+    """Low-confidence classification routes to the existing human-review pause state.
+
+    The classifier emits a safe, complete, non-risky classification (UI_BUG,
+    LOW urgency, no missing info) but with confidence=0.60. The router selects
+    REQUEST_HUMAN_APPROVAL; the workflow must reach AWAITING_HUMAN_REVIEW and
+    emit a review request event — identical to the risky-report path.
+    """
+    low_confidence_response = make_llm_response(
+        category=BugCategory.UI_BUG,
+        urgency=Urgency.LOW,
+        sentiment=Sentiment.NEUTRAL,
+        missing_info=[],
+        recommended_route=RouteName.CREATE_STANDARD_TICKET,
+        confidence=0.60,
+    )
+
+    async def run() -> tuple[WorkflowResult, list[object]]:
+        workflow = build_bug_triage_workflow(
+            make_classifier_agent(low_confidence_response)[0],
+            human_approval_enabled=True,
+        )
+        events = [
+            event
+            async for event in workflow.run(
+                (
+                    "In production on Chrome using macOS, when I click save, "
+                    "the page shows an error instead of saving. "
+                    "It should save successfully."
+                ),
+                stream=True,
+                include_status_events=True,
+            )
+        ]
+        pause_result = next(
+            event.data
+            for event in events
+            if isinstance(getattr(event, "data", None), WorkflowResult)
+        )
+        return pause_result, events
+
+    pause_result, events = asyncio.run(run())
+
+    print_workflow_result("low-confidence human-review pause", pause_result)
+
+    assert pause_result.selected_route == RouteName.REQUEST_HUMAN_APPROVAL
+    assert pause_result.status == WorkflowStatus.AWAITING_HUMAN_REVIEW
+    assert pause_result.human_review_required is True
+    assert pause_result.human_review_action is None
+    assert pause_result.approval_granted is None
+    assert pause_result.final_action is None
+    assert pause_result.error is None
+
+    request_events = [
+        event for event in events if getattr(event, "type", None) == "request_info"
+    ]
+    assert len(request_events) == 1
+
+    assert workflow_statuses(pause_result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.AWAITING_HUMAN_REVIEW,
+    ]
+
+
+def test_low_confidence_safe_report_escalates_directly_when_approval_disabled():
+    """Low-confidence classification inherits the existing direct-escalation fallback.
+
+    When human approval is disabled, REQUEST_HUMAN_APPROVAL is handled by
+    create_direct_escalation_ticket_executor — the same behavior as risky reports.
+    No human-review pause occurs and the workflow completes immediately.
+    """
+    low_confidence_response = make_llm_response(
+        category=BugCategory.UI_BUG,
+        urgency=Urgency.LOW,
+        sentiment=Sentiment.NEUTRAL,
+        missing_info=[],
+        recommended_route=RouteName.CREATE_STANDARD_TICKET,
+        confidence=0.60,
+    )
+
+    result = asyncio.run(
+        run_bug_triage_workflow(
+            (
+                "In production on Chrome using macOS, when I click save, "
+                "the page shows an error instead of saving. "
+                "It should save successfully."
+            ),
+            make_classifier_agent(low_confidence_response)[0],
+            human_approval_enabled=False,
+        )
+    )
+
+    print_workflow_result("low-confidence direct escalation", result)
+
+    assert result.status == WorkflowStatus.COMPLETED
+    assert result.selected_route == RouteName.CREATE_ESCALATION_TICKET
+    assert result.human_review_required is False
+    assert result.human_review_action is None
+    assert result.approval_granted is None
+    assert result.final_action == (
+        "Create an escalation ticket directly because human review "
+        "is disabled by configuration."
+    )
+    assert workflow_statuses(result) == [
+        WorkflowStatus.RECEIVED,
+        WorkflowStatus.PREPROCESSED,
+        WorkflowStatus.CLASSIFIED,
+        WorkflowStatus.ROUTED,
+        WorkflowStatus.COMPLETED,
+    ]
+    assert result.event_log[-1].executor == "create_direct_escalation_ticket_executor"
+    assert result.event_log[-1].data["human_review_enabled"] is False
+    assert result.event_log[-1].data["policy_route"] == RouteName.REQUEST_HUMAN_APPROVAL.value
+    assert result.event_log[-1].data["effective_route"] == RouteName.CREATE_ESCALATION_TICKET.value
 
 
 def test_built_workflow_object_cannot_be_reused_for_unrelated_reports():
