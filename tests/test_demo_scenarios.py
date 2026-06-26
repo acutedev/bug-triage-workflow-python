@@ -3,9 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
+from collections.abc import AsyncIterable, Awaitable, Sequence
+from typing import Any
 
 import pytest
+from agent_framework import (
+    Agent,
+    ChatResponse,
+    ChatResponseUpdate,
+    Content,
+    Message,
+    ResponseStream,
+)
 
 from scripts import run_demo_scenario as demo
 from src.models import (
@@ -118,6 +129,46 @@ def matching_result_for_scenario(scenario_name: str) -> WorkflowResult:
         return make_completed_result(RouteName.CREATE_ESCALATION_TICKET)
     if scenario_name == "classifier-failure":
         return make_classifier_failure_result()
+    if scenario_name == "adversarial-security":
+        classification = TriageClassification(
+            category=BugCategory.SECURITY,
+            urgency=Urgency.CRITICAL,
+            sentiment=Sentiment.NEUTRAL,
+            missing_info=[],
+            recommended_route=RouteName.CREATE_ESCALATION_TICKET,
+            reasoning="Credential exposure — genuine security incident.",
+            confidence=0.95,
+        )
+        return WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_ESCALATION_TICKET,
+            classification=classification,
+            human_review_required=True,
+            human_review_action=HumanReviewAction.APPROVE_ESCALATION,
+            approval_granted=True,
+            final_action="Escalation ticket created.",
+            error=None,
+        )
+    if scenario_name == "adversarial-benign-quote":
+        classification = TriageClassification(
+            category=BugCategory.UI_BUG,
+            urgency=Urgency.LOW,
+            sentiment=Sentiment.NEUTRAL,
+            missing_info=[],
+            recommended_route=RouteName.CREATE_STANDARD_TICKET,
+            reasoning="CSS layout issue — quoted text is not a security incident.",
+            confidence=0.9,
+        )
+        return WorkflowResult(
+            status=WorkflowStatus.COMPLETED,
+            selected_route=RouteName.CREATE_STANDARD_TICKET,
+            classification=classification,
+            human_review_required=False,
+            human_review_action=None,
+            approval_granted=None,
+            final_action="Standard ticket created.",
+            error=None,
+        )
 
     raise AssertionError(f"Unsupported scenario in test: {scenario_name}")
 
@@ -131,6 +182,8 @@ def test_scenario_registry_contains_exactly_supported_names():
         "report-rejected",
         "direct-escalation",
         "classifier-failure",
+        "adversarial-security",
+        "adversarial-benign-quote",
     ]
 
 
@@ -278,3 +331,191 @@ def test_no_secrets_appear_in_printed_output(monkeypatch, capsys):
     assert exit_code == 0
     assert secret not in captured.out
     assert secret not in captured.err
+
+
+# --- Task 2D.5: optional classifier expectation tests ---
+
+
+def _spec_with(**kwargs) -> demo.ScenarioSpec:
+    """Build a minimal ScenarioSpec with overrides for testing optional fields."""
+    return demo.ScenarioSpec(
+        name="standard-ticket",
+        report="irrelevant",
+        expected_status=WorkflowStatus.COMPLETED,
+        expected_route=RouteName.CREATE_STANDARD_TICKET,
+        expected_human_review_required=False,
+        expected_human_review_action=None,
+        expected_approval_granted=None,
+        **kwargs,
+    )
+
+
+def _result_with_category_urgency(
+    category: BugCategory, urgency: Urgency
+) -> WorkflowResult:
+    classification = TriageClassification(
+        category=category,
+        urgency=urgency,
+        sentiment=Sentiment.NEUTRAL,
+        missing_info=[],
+        recommended_route=RouteName.CREATE_STANDARD_TICKET,
+        reasoning="test",
+        confidence=0.9,
+    )
+    return WorkflowResult(
+        status=WorkflowStatus.COMPLETED,
+        selected_route=RouteName.CREATE_STANDARD_TICKET,
+        classification=classification,
+        human_review_required=False,
+        human_review_action=None,
+        approval_granted=None,
+        final_action="done",
+        error=None,
+    )
+
+
+def test_expected_category_passes_when_correct():
+    spec = _spec_with(expected_category=BugCategory.UI_BUG)
+    result = _result_with_category_urgency(BugCategory.UI_BUG, Urgency.MEDIUM)
+    demo.validate_result(spec, result)  # should not raise
+
+
+def test_expected_category_fails_when_incorrect():
+    spec = _spec_with(expected_category=BugCategory.SECURITY)
+    result = _result_with_category_urgency(BugCategory.UI_BUG, Urgency.MEDIUM)
+    with pytest.raises(demo.ScenarioValidationError, match="category"):
+        demo.validate_result(spec, result)
+
+
+def test_allowed_urgencies_passes_when_correct():
+    spec = _spec_with(allowed_urgencies=frozenset({Urgency.LOW, Urgency.MEDIUM}))
+    result = _result_with_category_urgency(BugCategory.UI_BUG, Urgency.MEDIUM)
+    demo.validate_result(spec, result)  # should not raise
+
+
+def test_allowed_urgencies_fails_when_incorrect():
+    spec = _spec_with(allowed_urgencies=frozenset({Urgency.CRITICAL}))
+    result = _result_with_category_urgency(BugCategory.UI_BUG, Urgency.MEDIUM)
+    with pytest.raises(demo.ScenarioValidationError, match="urgency"):
+        demo.validate_result(spec, result)
+
+
+def test_scenarios_without_optional_fields_validate_unchanged():
+    spec = _spec_with()  # no expected_category or allowed_urgencies
+    result = _result_with_category_urgency(BugCategory.SECURITY, Urgency.CRITICAL)
+    demo.validate_result(spec, result)  # should not raise — fields not checked
+
+
+# --- Task 2D.6: adversarial scenario registration tests ---
+
+
+def test_scenario_registry_contains_adversarial_scenarios():
+    assert "adversarial-security" in demo.SCENARIOS
+    assert "adversarial-benign-quote" in demo.SCENARIOS
+
+
+def test_adversarial_security_scenario_configuration():
+    spec = demo.SCENARIOS["adversarial-security"]
+    assert spec.expected_category == BugCategory.SECURITY
+    assert spec.allowed_urgencies is not None
+    assert Urgency.HIGH in spec.allowed_urgencies
+    assert Urgency.CRITICAL in spec.allowed_urgencies
+    assert spec.expected_human_review_required is True
+    assert spec.expected_approval_granted is True
+
+
+def test_adversarial_benign_quote_scenario_configuration():
+    spec = demo.SCENARIOS["adversarial-benign-quote"]
+    assert spec.expected_category == BugCategory.UI_BUG
+    assert spec.allowed_urgencies == frozenset({Urgency.LOW, Urgency.MEDIUM})
+    assert spec.expected_route == RouteName.CREATE_STANDARD_TICKET
+    assert spec.expected_human_review_required is False
+    assert spec.expected_approval_granted is None
+
+
+# --- Task 2D.7: fake-agent end-to-end execution of adversarial contracts ---
+
+
+class _DeterministicClassifierClient:
+    """Returns a fixed valid classification JSON without any network calls."""
+
+    def __init__(self, response: dict[str, Any]) -> None:
+        self._text = json.dumps(response)
+
+    def get_response(
+        self,
+        messages: Any,
+        *,
+        stream: bool = False,
+        options: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        text = self._text
+
+        if stream:
+            async def _stream() -> AsyncIterable[ChatResponseUpdate]:
+                yield ChatResponseUpdate(
+                    contents=[Content.from_text(text)],
+                    role="assistant",
+                    finish_reason="stop",
+                )
+
+            def _finalize(updates: Sequence[ChatResponseUpdate]) -> ChatResponse:
+                return ChatResponse.from_updates(
+                    updates,
+                    output_format_type=(options or {}).get("response_format"),
+                )
+
+            return ResponseStream(_stream(), finalizer=_finalize)
+
+        async def _get() -> ChatResponse:
+            return ChatResponse(
+                messages=Message(role="assistant", contents=[text])
+            )
+
+        return _get()
+
+
+def _make_deterministic_agent(response: dict[str, Any]) -> Agent:
+    return Agent(
+        client=_DeterministicClassifierClient(response),
+        name="classifier_agent",
+        instructions="Return bug classification JSON.",
+        default_options={"response_format": TriageClassification},
+    )
+
+
+def test_fake_agent_executes_adversarial_security_contract():
+    """Requirement 6: fake agent runs adversarial-security without live OpenAI calls."""
+    spec = demo.SCENARIOS["adversarial-security"]
+    agent = _make_deterministic_agent({
+        "category": "security",
+        "urgency": "critical",
+        "sentiment": "neutral",
+        "missing_info": [],
+        "recommended_route": "create_escalation_ticket",
+        "reasoning": "Credential exposure — genuine security incident.",
+        "confidence": 0.95,
+    })
+    result = asyncio.run(
+        demo.run_scenario_workflow(spec, agent, event_printer=lambda _: None)
+    )
+    demo.validate_result(spec, result)
+
+
+def test_fake_agent_executes_adversarial_benign_quote_contract():
+    """Requirement 6: fake agent runs adversarial-benign-quote without live OpenAI calls."""
+    spec = demo.SCENARIOS["adversarial-benign-quote"]
+    agent = _make_deterministic_agent({
+        "category": "ui_bug",
+        "urgency": "low",
+        "sentiment": "neutral",
+        "missing_info": [],
+        "recommended_route": "create_standard_ticket",
+        "reasoning": "CSS layout issue — quoted text is not a security incident.",
+        "confidence": 0.9,
+    })
+    result = asyncio.run(
+        demo.run_scenario_workflow(spec, agent, event_printer=lambda _: None)
+    )
+    demo.validate_result(spec, result)
