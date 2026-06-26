@@ -351,6 +351,8 @@ tracebacks for expected operational errors.
 │   ├── demo_08_adversarial_security.txt
 │   ├── demo_09_adversarial_benign_quote.txt
 │   └── demo_10_low_confidence_review.txt
+├── examples/
+│   └── security_bug.txt
 ├── pytest.ini
 ├── requirements.txt
 ├── scripts/
@@ -373,6 +375,7 @@ tracebacks for expected operational errors.
     ├── eval/
     │   └── test_adversarial_classifier.py
     ├── test_classifier.py
+    ├── test_cli_input.py
     ├── test_config.py
     ├── test_demo_scenarios.py
     ├── test_logging_config.py
@@ -426,17 +429,36 @@ Supported configuration variables:
 
 ## Running the Application
 
-Run the main sample CLI:
+`src/main.py` accepts a bug report from four mutually exclusive sources.
+
+**Built-in sample report** (demonstrates the human-review path):
 
 ```bash
-python -m src.main
+python -m src.main --demo
 ```
 
-The current CLI uses `SAMPLE_BUG_REPORT` from `src/main.py`. The sample is a
-security-oriented password-reset report intended to demonstrate the
-human-review path.
+**Inline text:**
 
-If the workflow pauses for review, the CLI prompts for one of three choices:
+```bash
+python -m src.main --text "The checkout button crashes in Chrome."
+```
+
+**File:**
+
+```bash
+python -m src.main --file examples/security_bug.txt
+```
+
+**Piped stdin:**
+
+```bash
+cat examples/security_bug.txt | python -m src.main
+```
+
+Running `python -m src.main` without any option or piped input prints a usage
+error and exits with code 2.
+
+If the workflow pauses for human review, the CLI prompts for one of three choices:
 
 ```text
 1. Approve escalation
@@ -450,7 +472,7 @@ resumes with the typed `HumanReviewDecision`.
 CLI exit codes implemented in `src/main.py`:
 
 - `0`: success
-- `2`: configuration validation problem
+- `2`: configuration validation problem or invalid / missing input
 - `1`: provider error, EOF while waiting for input, or unexpected runtime failure
 - `130`: keyboard interruption
 
@@ -465,7 +487,7 @@ python -m pytest
 Current verified result:
 
 ```text
-283 passed, 6 skipped
+307 passed, 6 skipped
 ```
 
 The automated tests use fakes, stubs, mocks, and deterministic responses. The
@@ -619,8 +641,7 @@ production hardening is listed under Next Steps for Production Readiness.
 
 ## Known Limitations
 
-- The main CLI is sample-driven and uses `SAMPLE_BUG_REPORT`.
-- There is no manual bug-entry CLI.
+- The CLI accepts a report via `--demo`, `--text`, `--file`, or piped stdin; there is no interactive multi-field entry form.
 - There is no persistent external ticket-system integration.
 - Ticketing, workflow persistence, reviewer identity, notifications, and audit storage do not yet have production Accessor and Resource implementations.
 - IDesign roles are represented as logical in-process component boundaries rather than independently deployed services.
@@ -662,7 +683,7 @@ Testing:
 
 - Live OpenAI adversarial evaluations exist in `tests/eval/` and are already opt-in. Expand coverage to include additional adversarial categories, edge cases, and model variants.
 - Keep live provider tests opt-in because of API cost, latency, external availability, rate limits, and nondeterministic model output.
-- Test manual bug entry if that CLI mode is added.
+- Test interactive multi-field bug entry if that CLI mode is added.
 - Test OpenAI timeout behavior, rate-limit behavior, and malformed provider responses.
 - Continue testing router exceptions and terminal-executor exceptions.
 - Add coverage for unknown request IDs, duplicate resume attempts, invalid reviewer responses, empty input, and oversized reports.
@@ -746,7 +767,7 @@ Product integration:
 Repository evidence supports the following:
 
 - Ten demo scenarios were validated, including two adversarial scenarios and one deterministic low-confidence-review scenario.
-- The full deterministic automated suite passed with `283 passed, 6 skipped`.
+- The full deterministic automated suite passed with `307 passed, 6 skipped`.
 - Live adversarial evaluations passed with `6 passed` using `gpt-4.1-mini`.
 - Source, scripts, and test compilation succeeded.
 - `.env` is not tracked.

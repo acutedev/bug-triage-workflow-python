@@ -1,9 +1,11 @@
-"""Command-line demo for the bug triage workflow."""
+"""Command-line interface for the bug triage workflow."""
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
+import pathlib
 import sys
 from dataclasses import asdict, is_dataclass
 from typing import Any
@@ -141,27 +143,14 @@ def read_human_review_decision() -> HumanReviewDecision:
     )
 
 
-async def run_demo(config: AppConfig | None = None) -> WorkflowResult:
-    """Run the sample bug report through the real workflow graph."""
-    configure_logging()
-    if config is None:
-        config = load_config()
-
-    classifier_agent = build_classifier_agent(config)
-    workflow = build_bug_triage_workflow(
-        classifier_agent,
-        human_approval_enabled=config.human_approval_enabled,
-    )
-
-    print_section("SAMPLE BUG REPORT")
-    print(SAMPLE_BUG_REPORT)
-
+async def _execute_workflow(workflow: Any, report_text: str) -> WorkflowResult:
+    """Stream workflow events, handle human review pause/resume, return result."""
     print_section("STREAMING WORKFLOW EVENTS")
     final_result: WorkflowResult | None = None
     request_event: Any | None = None
 
     async for event in workflow.run(
-        SAMPLE_BUG_REPORT,
+        report_text,
         stream=True,
         include_status_events=True,
     ):
@@ -193,14 +182,139 @@ async def run_demo(config: AppConfig | None = None) -> WorkflowResult:
                 final_result = result
 
     if final_result is None:
-        raise RuntimeError("Bug triage demo completed without a WorkflowResult.")
+        raise RuntimeError("Bug triage workflow completed without a WorkflowResult.")
 
     print_flow_summary(final_result)
     print_workflow_result(final_result)
     return final_result
 
 
-async def main() -> int:
+async def run_demo(config: AppConfig | None = None) -> WorkflowResult:
+    """Run the sample bug report through the real workflow graph."""
+    if config is None:
+        configure_logging()
+        config = load_config()
+
+    classifier_agent = build_classifier_agent(config)
+    workflow = build_bug_triage_workflow(
+        classifier_agent,
+        human_approval_enabled=config.human_approval_enabled,
+    )
+
+    print_section("SAMPLE BUG REPORT")
+    print(SAMPLE_BUG_REPORT)
+
+    return await _execute_workflow(workflow, SAMPLE_BUG_REPORT)
+
+
+async def run_with_report(report_text: str, config: AppConfig) -> WorkflowResult:
+    """Run the given bug report text through the real workflow graph."""
+    classifier_agent = build_classifier_agent(config)
+    workflow = build_bug_triage_workflow(
+        classifier_agent,
+        human_approval_enabled=config.human_approval_enabled,
+    )
+
+    print_section("BUG REPORT")
+    print(report_text)
+
+    return await _execute_workflow(workflow, report_text)
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    """Parse CLI arguments, returning a Namespace."""
+    parser = argparse.ArgumentParser(
+        prog="python -m src.main",
+        description="Run the bug triage workflow on a bug report.",
+    )
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--demo",
+        action="store_true",
+        help="Run the built-in sample bug report.",
+    )
+    group.add_argument(
+        "--text",
+        metavar="REPORT",
+        help="Bug report provided directly as a string.",
+    )
+    group.add_argument(
+        "--file",
+        metavar="PATH",
+        help="Path to a plain-text file containing the bug report.",
+    )
+    return parser.parse_args(argv)
+
+
+def resolve_input(args: argparse.Namespace) -> tuple[str | None, bool]:
+    """Return (report_text, is_demo).
+
+    report_text is None and is_demo is True when --demo is selected.
+    Prints an error to stderr and raises SystemExit(2) for invalid input.
+    """
+    stdin_piped = not sys.stdin.isatty()
+    explicit_flag = (
+        "--demo" if args.demo
+        else "--text" if args.text is not None
+        else "--file" if args.file is not None
+        else None
+    )
+    if stdin_piped and explicit_flag is not None:
+        print(
+            f"Error: piped stdin cannot be combined with {explicit_flag}. "
+            "Provide exactly one input source.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    if args.demo:
+        return None, True
+
+    if args.text is not None:
+        text = args.text.strip()
+        if not text:
+            print("Error: --text value is empty or whitespace-only.", file=sys.stderr)
+            raise SystemExit(2)
+        return text, False
+
+    if args.file is not None:
+        try:
+            raw = pathlib.Path(args.file).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            print(f"Error: file not found: {args.file}", file=sys.stderr)
+            raise SystemExit(2)
+        except OSError as exc:
+            print(f"Error reading file {args.file}: {exc}", file=sys.stderr)
+            raise SystemExit(2)
+        text = raw.strip()
+        if not text:
+            print(
+                f"Error: file is empty or whitespace-only: {args.file}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        return text, False
+
+    # No explicit flag — check whether stdin is piped
+    if sys.stdin.isatty():
+        print(
+            "Error: no bug report provided.\n"
+            "Use --demo, --text REPORT, --file PATH, or pipe a report via stdin.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    text = sys.stdin.read().strip()
+    if not text:
+        print(
+            "Error: piped stdin is empty or whitespace-only.",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    return text, False
+
+
+async def main(argv: list[str] | None = None) -> int:
     """Command-line entry point."""
     logger = configure_logging()
 
@@ -210,12 +324,27 @@ async def main() -> int:
         except ValueError as error:
             print(f"Configuration error: {error}", file=sys.stderr)
             return 2
-        await run_demo(config)
+
+        try:
+            args = parse_args(argv)
+        except SystemExit as exc:
+            return int(exc.code) if exc.code is not None else 2
+
+        try:
+            report_text, is_demo = resolve_input(args)
+        except SystemExit as exc:
+            return int(exc.code) if exc.code is not None else 2
+
+        if is_demo:
+            await run_demo(config)
+        else:
+            await run_with_report(report_text, config)
+
     except KeyboardInterrupt:
         print("Operation cancelled by user.", file=sys.stderr)
         return 130
     except EOFError:
-        print("Input closed; bug triage demo cancelled.", file=sys.stderr)
+        print("Input closed; bug triage workflow cancelled.", file=sys.stderr)
         return 1
     except OpenAIError as error:
         print(f"Provider error: {error}", file=sys.stderr)
@@ -223,7 +352,7 @@ async def main() -> int:
     except Exception:
         logger.exception("Bug triage CLI failed unexpectedly")
         print(
-            "Unexpected error: bug triage demo failed. See logs for details.",
+            "Unexpected error: bug triage workflow failed. See logs for details.",
             file=sys.stderr,
         )
         return 1

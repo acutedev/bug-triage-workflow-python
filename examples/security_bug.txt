@@ -1,0 +1,26 @@
+Users can reset another user's password by changing the account ID in the
+password-reset request.
+
+Environment: production
+Browser: Chrome 137
+Operating system: macOS
+Module: authentication
+
+Steps to reproduce:
+1. Sign in as a standard user.
+2. Open the password-reset page.
+3. Intercept the POST /api/password-reset request with a proxy tool.
+4. Change the account_id parameter to another user's account ID.
+5. Forward the modified request.
+
+Expected result:
+The server rejects the request and only allows the signed-in user to reset
+their own password.
+
+Actual result:
+The password for the targeted account is reset successfully. The attacker
+receives a confirmation email sent to the victim's address.
+
+This is a critical security vulnerability (broken object-level authorization)
+affecting the production environment. Any authenticated user can take over
+any other account.

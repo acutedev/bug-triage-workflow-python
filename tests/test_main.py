@@ -7,6 +7,7 @@ from openai import OpenAIError
 
 from src import main as main_module
 from src.config import AppConfig
+from tests.conftest import _InteractiveTty
 
 
 class CapturingLogger:
@@ -31,11 +32,14 @@ def configure_cli_test(monkeypatch):
     config = make_config()
     monkeypatch.setattr(main_module, "configure_logging", lambda: logger)
     monkeypatch.setattr(main_module, "load_config", lambda: config)
+    monkeypatch.setattr(sys, "stdin", _InteractiveTty())
     return config, logger
 
 
-def run_cli() -> int:
-    return asyncio.run(main_module.main())
+def run_cli(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = ["--demo"]
+    return asyncio.run(main_module.main(argv))
 
 
 def test_main_successful_run_returns_zero(monkeypatch, capsys):
@@ -98,7 +102,7 @@ def test_main_unexpected_configuration_error_returns_one_and_logs_exception(
     stderr = capsys.readouterr().err
     assert exit_code == 1
     assert (
-        "Unexpected error: bug triage demo failed. See logs for details."
+        "Unexpected error: bug triage workflow failed. See logs for details."
         in stderr
     )
     assert "configuration loader failed" not in stderr
@@ -135,7 +139,7 @@ def test_main_eof_error_returns_one(monkeypatch, capsys):
     exit_code = run_cli()
 
     assert exit_code == 1
-    assert "Input closed; bug triage demo cancelled." in capsys.readouterr().err
+    assert "Input closed; bug triage workflow cancelled." in capsys.readouterr().err
 
 
 def test_main_provider_error_returns_one(monkeypatch, capsys):
@@ -167,7 +171,7 @@ def test_main_generic_runtime_error_returns_one_and_logs_exception(
 
     stderr = capsys.readouterr().err
     assert exit_code == 1
-    assert "Unexpected error: bug triage demo failed. See logs for details." in stderr
+    assert "Unexpected error: bug triage workflow failed. See logs for details." in stderr
     assert "unexpected failure" not in stderr
 
     assert len(logger.exceptions) == 1
