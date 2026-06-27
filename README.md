@@ -105,22 +105,24 @@ flowchart TB
 
 ## Docker Quick-Start
 
-Docker runs the full workflow without installing Python locally. Versioned prebuilt images will be published to GitHub Container Registry when a GitHub Release is published, and `latest` will be published for stable releases. Until the first release is available, build the image locally using the commands below.
+Docker runs the full workflow without installing Python locally. Versioned prebuilt images are published to GitHub Container Registry when a GitHub Release is published, and stable releases are also published with the `latest` tag.
 
-### Prebuilt image after the first release
+### Prebuilt image
 
-After the first stable GitHub Release is published, the image will be available at:
+The prebuilt image is available at:
 
 ```bash
 docker pull ghcr.io/acutedev/bug-triage-workflow-python:latest
 docker run --rm ghcr.io/acutedev/bug-triage-workflow-python:latest --help
 ```
 
-Versioned releases will also be available by tag, for example:
+Versioned releases are also available by tag, for example:
 
 ```bash
 docker pull ghcr.io/acutedev/bug-triage-workflow-python:v1.0.0
 ```
+
+### Build locally
 
 ```bash
 cp .env.example .env
