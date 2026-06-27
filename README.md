@@ -650,3 +650,7 @@ Product integration:
 - Add escalation queues and assignment rules.
 - Add a feedback loop from resolved tickets.
 - Add analytics for classifier and routing quality.
+
+## License
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE) for details.
