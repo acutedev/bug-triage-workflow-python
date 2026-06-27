@@ -4,6 +4,11 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+    inputs:
+      tag:
+        description: Docker tag to publish
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -16,6 +21,23 @@ jobs:
     steps:
       - name: Check out the repo
         uses: actions/checkout@v4
+
+      - name: Validate manual tag
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          normalized_tag=$(printf '%s' "$REQUESTED_TAG" | tr '[:upper:]' '[:lower:]')
+
+          if [ "$normalized_tag" = "latest" ]; then
+            echo "Error: the tag 'latest' is reserved for stable releases and cannot be set manually."
+            exit 1
+          fi
+
+          if ! printf '%s' "$REQUESTED_TAG" | grep -Eq '^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$'; then
+            echo "Error: invalid Docker tag. Use 1-128 characters: letters, numbers, underscores, periods, or hyphens; the first character must be a letter, number, or underscore."
+            exit 1
+          fi
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -31,7 +53,8 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=raw,value=${{ github.event.release.tag_name }},enable=${{ github.event_name == 'release' }}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ github.event_name == 'release' && !github.event.release.prerelease }}
+            type=raw,value=${{ inputs.tag }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
